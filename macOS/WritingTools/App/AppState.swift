@@ -112,10 +112,12 @@ final class AppState {
 
         switch providerName {
         case "openai":
+            let authMode = OpenAIAuthMode(rawValue: asettings.openAIAuthMode) ?? .apiKey
             let config = OpenAIConfig(
                 apiKey: asettings.openAIApiKey,
                 baseURL: asettings.openAIBaseURL,
-                model: model
+                model: model,
+                authMode: authMode
             )
             return OpenAIProvider(config: config)
 
@@ -181,10 +183,12 @@ final class AppState {
         self.geminiProvider = GeminiProvider(config: geminiConfig)
 
         // Initialize OpenAI
+        let authMode = OpenAIAuthMode(rawValue: asettings.openAIAuthMode) ?? .apiKey
         let openAIConfig = OpenAIConfig(
             apiKey: asettings.openAIApiKey,
             baseURL: asettings.openAIBaseURL,
-            model: asettings.openAIModel
+            model: asettings.openAIModel,
+            authMode: authMode
         )
         self.openAIProvider = OpenAIProvider(config: openAIConfig)
 
@@ -261,7 +265,8 @@ final class AppState {
         asettings.openAIProject = project
         asettings.openAIModel = model
 
-        let config = OpenAIConfig(apiKey: apiKey, baseURL: baseURL, model: model)
+        let authMode = OpenAIAuthMode(rawValue: asettings.openAIAuthMode) ?? .apiKey
+        let config = OpenAIConfig(apiKey: apiKey, baseURL: baseURL, model: model, authMode: authMode)
         openAIProvider = OpenAIProvider(config: config)
     }
 

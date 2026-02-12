@@ -105,6 +105,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         appState.activeProvider.cancel()
 
         Task { @MainActor in
+            // Check accessibility permissions first
+            let hasAccessibility = AXIsProcessTrusted()
+            if !hasAccessibility {
+                logger.error("Accessibility permissions not granted! Cannot simulate Cmd+C. Please grant accessibility permissions in System Settings.")
+                
+                // Show alert to user
+                let alert = NSAlert()
+                alert.messageText = "Accessibility Permission Required"
+                alert.informativeText = "Writing Tools needs accessibility permission to capture selected text. Please enable it in System Settings > Privacy & Security > Accessibility."
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: "Open System Settings")
+                alert.addButton(withTitle: "Cancel")
+                
+                if alert.runModal() == .alertFirstButtonReturn {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                return
+            }
+            
             // Store the previous app BEFORE any operations
             let previousApp = NSWorkspace.shared.frontmostApplication
 

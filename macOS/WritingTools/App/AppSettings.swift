@@ -57,6 +57,10 @@ final class AppSettings {
         didSet { defaults.set(openAIProject, forKey: "openai_project") }
     }
     
+    var openAIAuthMode: String {
+        didSet { defaults.set(openAIAuthMode, forKey: "openai_auth_mode") }
+    }
+    
     var currentProvider: String {
         didSet { defaults.set(currentProvider, forKey: "current_provider") }
     }
@@ -169,6 +173,7 @@ final class AppSettings {
         self.openAIModel = defaults.string(forKey: "openai_model") ?? OpenAIConfig.defaultModel
         self.openAIOrganization = defaults.string(forKey: "openai_organization")
         self.openAIProject = defaults.string(forKey: "openai_project")
+        self.openAIAuthMode = defaults.string(forKey: "openai_auth_mode") ?? "apiKey"
         
         self.mistralApiKey = (try? keychain.retrieve(forKey: "mistral_api_key")) ?? ""
         self.mistralBaseURL = defaults.string(forKey: "mistral_base_url") ?? MistralConfig.defaultBaseURL
@@ -231,5 +236,27 @@ final class AppSettings {
         
         // Clear Keychain API keys
         try? keychain.clearAllApiKeys()
+    }
+    
+    // MARK: - OAuth Token Management
+    
+    func saveOAuthTokens(_ tokens: OAuthTokens) throws {
+        try keychain.saveOAuthTokens(tokens)
+    }
+    
+    func retrieveOAuthTokens() throws -> OAuthTokens? {
+        try keychain.retrieveOAuthTokens()
+    }
+    
+    func deleteOAuthTokens() throws {
+        try keychain.deleteOAuthTokens()
+    }
+    
+    var isOpenAISignedInWithOAuth: Bool {
+        (try? keychain.retrieveOAuthTokens()) != nil
+    }
+    
+    var openAIOAuthAccountId: String? {
+        (try? keychain.retrieveOAuthTokens())?.accountId
     }
 }

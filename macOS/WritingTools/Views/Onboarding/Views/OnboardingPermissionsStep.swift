@@ -10,12 +10,15 @@ import ApplicationServices
 import CoreGraphics
 
 struct OnboardingPermissionsStep: View {
-  @State var isAccessibilityGranted: Bool
-  @State var isScreenRecordingGranted: Bool
-  @State var wantsScreenshotOCR: Bool
+  @Binding var isAccessibilityGranted: Bool
+  @Binding var isScreenRecordingGranted: Bool
+  @Binding var wantsScreenshotOCR: Bool
 
   var onRefresh: () -> Void
   var onOpenPrivacyPane: (String) -> Void
+  
+  // Timer to auto-refresh permissions
+  @State private var refreshTimer: Timer?
 
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
@@ -125,6 +128,26 @@ struct OnboardingPermissionsStep: View {
       }
       .padding(.top, 4)
     }
+    .onAppear {
+      // Start auto-refresh timer when view appears
+      startAutoRefresh()
+    }
+    .onDisappear {
+      // Stop timer when view disappears
+      stopAutoRefresh()
+    }
+  }
+  
+  private func startAutoRefresh() {
+    // Check permissions every second while on this screen
+    refreshTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+      onRefresh()
+    }
+  }
+  
+  private func stopAutoRefresh() {
+    refreshTimer?.invalidate()
+    refreshTimer = nil
   }
 }
 
@@ -132,19 +155,14 @@ struct OnboardingPermissionsStep: View {
 
 struct OnboardingPermissionsHelper {
   static func requestAccessibility() {
+    // Show macOS system prompt - it includes a button to open System Settings
     let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as CFString
     let options: CFDictionary = [key: true] as CFDictionary
     _ = AXIsProcessTrustedWithOptions(options)
-
-    Task { @MainActor in
-      try? await Task.sleep(for: .milliseconds(200))
-      if let url = URL(
-        string:
-          "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
-      ) {
-        NSWorkspace.shared.open(url)
-      }
-    }
+    
+    // Note: We don't automatically open System Settings anymore.
+    // The system prompt already has an "Open System Settings" button.
+    // Users can also click the "Open Settings" button if they dismiss the prompt.
   }
 
   static func checkScreenRecording() -> Bool {
