@@ -53,6 +53,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         Task { @MainActor [weak self] in
+            // Migrate keychain items to include ACL (eliminates password prompts)
+            // This is a one-time operation for existing users
+            if KeychainManager.shared.needsACLMigration {
+                logger.info("Starting keychain ACL migration...")
+                KeychainManager.shared.migrateKeychainItemsToACL()
+            }
+            
             self?.setupMenuBar()
 
             if self?.statusBarItem == nil {
