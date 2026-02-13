@@ -27,9 +27,39 @@ struct OpenAIConfig: Codable {
     static let defaultModel = "gpt-5.3-codex"
 }
 
+// MARK: - Model Metadata
+
+enum SubscriptionTier: String {
+    case plus = "Plus"
+    case pro = "Pro"
+    case api = "API"
+    
+    var displayName: String {
+        return rawValue
+    }
+}
+
+enum ModelStatus: String {
+    case current = "Current"
+    case preview = "Preview"
+    case legacy = "Legacy"
+    case deprecated = "Deprecated"
+}
+
+struct ModelMetadata {
+    let displayName: String
+    let description: String
+    let tier: SubscriptionTier
+    let isRecommended: Bool
+    let releaseDate: String
+    let status: ModelStatus
+    let documentationURL: String
+}
+
 enum OpenAIModel: String, CaseIterable {
     // Latest Codex models (GPT-5.3)
     case gpt53Codex = "gpt-5.3-codex"
+    case gpt53CodexSpark = "gpt-5.3-codex-spark"
     
     // GPT-5.2 models
     case gpt52Codex = "gpt-5.2-codex"
@@ -47,52 +77,125 @@ enum OpenAIModel: String, CaseIterable {
     case gpt5 = "gpt-5"
     
     var displayName: String {
-        switch self {
-        case .gpt53Codex:
-            return "GPT-5.3-Codex (Recommended)"
-        case .gpt52Codex:
-            return "GPT-5.2-Codex"
-        case .gpt52:
-            return "GPT-5.2"
-        case .gpt51CodexMax:
-            return "GPT-5.1-Codex-Max"
-        case .gpt51Codex:
-            return "GPT-5.1-Codex"
-        case .gpt51CodexMini:
-            return "GPT-5.1-Codex-Mini"
-        case .gpt51:
-            return "GPT-5.1"
-        case .gpt5Codex:
-            return "GPT-5-Codex (Legacy)"
-        case .gpt5CodexMini:
-            return "GPT-5-Codex-Mini (Legacy)"
-        case .gpt5:
-            return "GPT-5 (Legacy)"
-        }
+        return metadata.displayName
     }
     
     var description: String {
+        return metadata.description
+    }
+    
+    var metadata: ModelMetadata {
         switch self {
         case .gpt53Codex:
-            return "Most capable agentic coding model"
+            return ModelMetadata(
+                displayName: "GPT-5.3-Codex",
+                description: "Most capable agentic coding model to date",
+                tier: .plus,
+                isRecommended: true,
+                releaseDate: "2026-01",
+                status: .current,
+                documentationURL: "https://developers.openai.com/codex/models#gpt-5-3-codex"
+            )
+        case .gpt53CodexSpark:
+            return ModelMetadata(
+                displayName: "GPT-5.3-Codex-Spark",
+                description: "Research preview for near-instant, real-time coding iteration",
+                tier: .pro,
+                isRecommended: false,
+                releaseDate: "2026-01",
+                status: .preview,
+                documentationURL: "https://developers.openai.com/codex/models#gpt-5-3-codex-spark"
+            )
         case .gpt52Codex:
-            return "Advanced coding model for real-world engineering"
+            return ModelMetadata(
+                displayName: "GPT-5.2-Codex",
+                description: "Advanced coding model for real-world engineering",
+                tier: .plus,
+                isRecommended: false,
+                releaseDate: "2025-11",
+                status: .current,
+                documentationURL: "https://developers.openai.com/codex/models#gpt-5-2-codex"
+            )
         case .gpt52:
-            return "Best general agentic model"
+            return ModelMetadata(
+                displayName: "GPT-5.2",
+                description: "Best general agentic model for tasks across domains",
+                tier: .plus,
+                isRecommended: false,
+                releaseDate: "2025-11",
+                status: .current,
+                documentationURL: "https://developers.openai.com/codex/models#gpt-5-2"
+            )
         case .gpt51CodexMax:
-            return "Optimized for long-horizon agentic coding"
+            return ModelMetadata(
+                displayName: "GPT-5.1-Codex-Max",
+                description: "Optimized for long-horizon agentic coding tasks",
+                tier: .plus,
+                isRecommended: false,
+                releaseDate: "2025-08",
+                status: .current,
+                documentationURL: "https://developers.openai.com/codex/models#gpt-5-1-codex-max"
+            )
         case .gpt51Codex:
-            return "Optimized for long-running agentic coding"
+            return ModelMetadata(
+                displayName: "GPT-5.1-Codex",
+                description: "Optimized for long-running agentic coding tasks",
+                tier: .plus,
+                isRecommended: false,
+                releaseDate: "2025-08",
+                status: .current,
+                documentationURL: "https://developers.openai.com/codex/models#gpt-5-1-codex"
+            )
         case .gpt51CodexMini:
-            return "Smaller, more cost-effective version"
+            return ModelMetadata(
+                displayName: "GPT-5.1-Codex-Mini",
+                description: "Smaller, more cost-effective version",
+                tier: .plus,
+                isRecommended: false,
+                releaseDate: "2025-08",
+                status: .current,
+                documentationURL: "https://developers.openai.com/codex/models#gpt-5-1-codex-mini"
+            )
         case .gpt51:
-            return "Great for coding and agentic tasks"
+            return ModelMetadata(
+                displayName: "GPT-5.1",
+                description: "Great for coding and agentic tasks across domains",
+                tier: .plus,
+                isRecommended: false,
+                releaseDate: "2025-08",
+                status: .current,
+                documentationURL: "https://developers.openai.com/codex/models#gpt-5-1"
+            )
         case .gpt5Codex:
-            return "Older version, succeeded by GPT-5.1-Codex"
+            return ModelMetadata(
+                displayName: "GPT-5-Codex",
+                description: "Older version, succeeded by GPT-5.1-Codex",
+                tier: .plus,
+                isRecommended: false,
+                releaseDate: "2025-05",
+                status: .legacy,
+                documentationURL: "https://developers.openai.com/codex/models#gpt-5-codex"
+            )
         case .gpt5CodexMini:
-            return "Older smaller version"
+            return ModelMetadata(
+                displayName: "GPT-5-Codex-Mini",
+                description: "Older smaller version, succeeded by GPT-5.1-Codex-Mini",
+                tier: .plus,
+                isRecommended: false,
+                releaseDate: "2025-05",
+                status: .legacy,
+                documentationURL: "https://developers.openai.com/codex/models#gpt-5-codex-mini"
+            )
         case .gpt5:
-            return "Reasoning model for coding"
+            return ModelMetadata(
+                displayName: "GPT-5",
+                description: "Reasoning model for coding, succeeded by GPT-5.1",
+                tier: .plus,
+                isRecommended: false,
+                releaseDate: "2025-05",
+                status: .legacy,
+                documentationURL: "https://developers.openai.com/codex/models#gpt-5"
+            )
         }
     }
 }
