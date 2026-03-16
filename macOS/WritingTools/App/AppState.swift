@@ -352,6 +352,21 @@ final class AppState {
                     logger.debug("Added trailing newline to match input")
                 }
 
+                // Record to history
+                let capturedInput = selectedText
+                let capturedApp = previousApplication
+                let matchedProfile = capturedApp.map {
+                    AppProfileService.shared.resolveProfile(for: ActiveAppContext(from: $0))
+                } ?? nil
+                HistoryManager.shared.record(
+                    commandName: command.name,
+                    commandId: command.id,
+                    inputText: capturedInput,
+                    outputText: result,
+                    sourceApp: capturedApp,
+                    matchedProfileName: matchedProfile?.name
+                )
+
                 if command.useResponseWindow {
                     let window = ResponseWindow(
                         title: "\(command.name) Result",

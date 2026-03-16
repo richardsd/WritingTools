@@ -150,6 +150,11 @@ final class AppSettings {
     var openCustomCommandsInResponseWindow: Bool {
         didSet { defaults.set(openCustomCommandsInResponseWindow, forKey: "open_custom_commands_in_response_window") }
     }
+
+    // MARK: - History Settings
+    var isHistoryEnabled: Bool {
+        didSet { defaults.set(isHistoryEnabled, forKey: "is_history_enabled") }
+    }
     
     // MARK: - Init
     private init() {
@@ -207,6 +212,9 @@ final class AppSettings {
         
         // Custom commands setting - default to true (open in response window)
         self.openCustomCommandsInResponseWindow = defaults.object(forKey: "open_custom_commands_in_response_window") as? Bool ?? true
+
+        // History - enabled by default
+        self.isHistoryEnabled = defaults.object(forKey: "is_history_enabled") as? Bool ?? true
     }
 
     deinit {

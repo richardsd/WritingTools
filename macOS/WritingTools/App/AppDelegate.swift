@@ -269,6 +269,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 logger.debug("Added trailing newline to match input")
             }
 
+            // Record to history
+            let capturedApp = appState.previousApplication
+            let matchedProfile = capturedApp.map {
+                AppProfileService.shared.resolveProfile(for: ActiveAppContext(from: $0))
+            } ?? nil
+            await MainActor.run {
+                HistoryManager.shared.record(
+                    commandName: command.name,
+                    commandId: command.id,
+                    inputText: originalText,
+                    outputText: result,
+                    sourceApp: capturedApp,
+                    matchedProfileName: matchedProfile?.name
+                )
+            }
+
             await MainActor.run {
                 if command.useResponseWindow {
                     let window = ResponseWindow(

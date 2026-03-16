@@ -104,6 +104,23 @@ struct GeneralSettingsPane<SaveButton: View>: View {
                 }
             }
 
+            GroupBox("History") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("When enabled, Writing Tools records the last \(HistoryManager.maxEntries) command inputs and outputs locally on your device.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+
+                    Toggle(isOn: $settings.isHistoryEnabled) {
+                        Text("Record command history")
+                    }
+                    .toggleStyle(.checkbox)
+                    .onChange(of: settings.isHistoryEnabled) { _, _ in
+                        needsSaving = true
+                    }
+                    .help("Store a local log of command inputs and outputs. You can review and manage history in the History tab.")
+                }
+            }
+
             Spacer()
 
             if !showOnlyApiSetup {
