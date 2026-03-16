@@ -255,7 +255,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let provider = appState.getProvider(for: command)
 
             var result = try await provider.processText(
-                systemPrompt: command.prompt,
+                systemPrompt: AppProfileService.shared.enrichSystemPrompt(command.prompt, for: appState.previousApplication),
                 userPrompt: appState.selectedText,
                 images: appState.selectedImages,
                 streaming: false

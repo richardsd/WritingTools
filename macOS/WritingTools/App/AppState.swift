@@ -333,7 +333,7 @@ final class AppState {
 
         Task {
             do {
-                let prompt = command.prompt
+                let prompt = AppProfileService.shared.enrichSystemPrompt(command.prompt, for: previousApplication)
 
                 // Get the appropriate provider for this command (respects per-command overrides)
                 let provider = getProvider(for: command)

@@ -23,6 +23,7 @@ struct SettingsView: View {
         case general     = "General"
         case appearance  = "Appearance"
         case aiProvider  = "AI Provider"
+        case profiles    = "Profiles"
         
         var id: Self { self }
         
@@ -34,6 +35,8 @@ struct SettingsView: View {
                 return "paintbrush"
             case .aiProvider:
                 return "network"
+            case .profiles:
+                return "person.crop.rectangle.stack"
             }
         }
     }
@@ -74,10 +77,17 @@ struct SettingsView: View {
                 .tabItem {
                     Label("AI Provider", systemImage: SettingsTab.aiProvider.systemImage)
                 }
+
+                AppProfilesSettingsPane(saveButton: saveButton)
+                    .tag(SettingsTab.profiles)
+                    .tabItem {
+                        Label("Profiles", systemImage: SettingsTab.profiles.systemImage)
+                    }
             }
-            .padding(20)
+            .padding(selectedTab == .profiles ? 0 : 20)
         }
-        .frame(width: 540, height: showOnlyApiSetup ? 470 : 540)
+        .frame(width: selectedTab == .profiles ? 750 : 540,
+               height: showOnlyApiSetup ? 470 : 540)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .windowBackground(useGradient: settings.useGradientTheme)
         .onAppear(perform: restoreLastTab)
