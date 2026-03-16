@@ -16,6 +16,8 @@ final class CustomProvider: AIProvider {
     private let config: CustomProviderConfig
     private var currentTask: Task<Void, Never>?
 
+    var modelDisplayName: String { config.model }
+
     init(config: CustomProviderConfig) {
         self.config = config
     }

@@ -9,6 +9,8 @@ struct HistoryEntry: Codable, Identifiable, Equatable {
     let commandId: UUID?
     let inputText: String
     let outputText: String
+    /// The AI model identifier used, e.g. "gpt-4o" or "gemini-flash-latest".
+    let modelName: String?
     let sourceAppName: String?
     let sourceAppBundleId: String?
     /// The name of the matched AppProfile at execution time, if any.
@@ -21,6 +23,7 @@ struct HistoryEntry: Codable, Identifiable, Equatable {
         commandId: UUID? = nil,
         inputText: String,
         outputText: String,
+        modelName: String? = nil,
         sourceAppName: String? = nil,
         sourceAppBundleId: String? = nil,
         matchedProfileName: String? = nil
@@ -31,6 +34,7 @@ struct HistoryEntry: Codable, Identifiable, Equatable {
         self.commandId = commandId
         self.inputText = inputText
         self.outputText = outputText
+        self.modelName = modelName
         self.sourceAppName = sourceAppName
         self.sourceAppBundleId = sourceAppBundleId
         self.matchedProfileName = matchedProfileName

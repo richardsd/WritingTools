@@ -36,6 +36,8 @@ final class OllamaProvider: AIProvider {
     var isProcessing = false
     private var config: OllamaConfig
 
+    var modelDisplayName: String { config.model }
+
     init(config: OllamaConfig) {
         self.config = config
     }

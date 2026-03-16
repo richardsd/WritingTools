@@ -363,6 +363,7 @@ final class AppState {
                     commandId: command.id,
                     inputText: capturedInput,
                     outputText: result,
+                    modelName: provider.modelDisplayName.isEmpty ? nil : provider.modelDisplayName,
                     sourceApp: capturedApp,
                     matchedProfileName: matchedProfile?.name
                 )

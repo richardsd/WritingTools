@@ -26,6 +26,10 @@ struct HistoryDetailView: View {
                             Label(appName, systemImage: "app.badge")
                         }
 
+                        if let modelName = entry.modelName {
+                            Label(modelName, systemImage: "cpu")
+                        }
+
                         if let profileName = entry.matchedProfileName {
                             Label(profileName, systemImage: "person.crop.rectangle.stack")
                                 .foregroundStyle(Color.accentColor)

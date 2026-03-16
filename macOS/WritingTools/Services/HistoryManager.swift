@@ -39,6 +39,7 @@ final class HistoryManager {
         commandId: UUID?,
         inputText: String,
         outputText: String,
+        modelName: String?,
         sourceApp: NSRunningApplication?,
         matchedProfileName: String?
     ) {
@@ -50,6 +51,7 @@ final class HistoryManager {
             commandId: commandId,
             inputText: inputText,
             outputText: outputText,
+            modelName: modelName,
             sourceAppName: sourceApp?.localizedName,
             sourceAppBundleId: sourceApp?.bundleIdentifier,
             matchedProfileName: matchedProfileName

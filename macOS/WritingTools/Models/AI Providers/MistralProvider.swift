@@ -29,6 +29,9 @@ enum MistralModel: String, CaseIterable {
 @Observable
 final class MistralProvider: AIProvider {
     var isProcessing = false
+
+    var modelDisplayName: String { config.model }
+
     private var config: MistralConfig
     private var aiProxyService: MistralService?
     private var currentTask: Task<Void, Never>?

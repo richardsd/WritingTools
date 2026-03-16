@@ -22,7 +22,7 @@ struct OpenAIConfig: Codable {
     var baseURL: String
     var model: String
     var authMode: OpenAIAuthMode
-    
+
     static let defaultBaseURL = "https://api.openai.com"
     static let defaultModel = "gpt-5.3-codex"
 }
@@ -206,6 +206,8 @@ final class OpenAIProvider: AIProvider {
     private var config: OpenAIConfig
     private var aiProxyService: OpenAIService?
     private var currentTask: Task<Void, Never>?
+
+    var modelDisplayName: String { config.model }
     
     // OAuth state
     private var callbackServer: CodexCallbackServer?

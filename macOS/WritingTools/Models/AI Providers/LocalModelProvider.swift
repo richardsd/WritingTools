@@ -106,6 +106,8 @@ class LocalModelProvider {
     var selectedModelType: LocalModelType? {
         LocalModelType.from(id: settings.selectedLocalLLMId)
     }
+
+    var modelDisplayName: String { selectedModelType?.displayName ?? "" }
     
     // property to track if we're using a VLM model
     private var isUsingVisionModel: Bool {

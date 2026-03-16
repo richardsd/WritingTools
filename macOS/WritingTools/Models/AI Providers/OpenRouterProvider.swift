@@ -32,7 +32,9 @@ enum OpenRouterModel: String, CaseIterable {
 @Observable
 final class OpenRouterProvider: AIProvider {
     var isProcessing = false
-    
+
+    var modelDisplayName: String { config.model }
+
     private var config: OpenRouterConfig
     private var aiProxyService: OpenRouterService?
     private var currentTask: Task<Void, Never>?

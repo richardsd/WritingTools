@@ -280,6 +280,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     commandId: command.id,
                     inputText: originalText,
                     outputText: result,
+                    modelName: provider.modelDisplayName.isEmpty ? nil : provider.modelDisplayName,
                     sourceApp: capturedApp,
                     matchedProfileName: matchedProfile?.name
                 )
