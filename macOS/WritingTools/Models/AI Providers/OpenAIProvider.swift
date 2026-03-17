@@ -24,7 +24,7 @@ struct OpenAIConfig: Codable {
     var authMode: OpenAIAuthMode
 
     static let defaultBaseURL = "https://api.openai.com"
-    static let defaultModel = "gpt-5.3-codex"
+    static let defaultModel = "gpt-5.4"
 }
 
 // MARK: - Model Metadata
@@ -57,7 +57,8 @@ struct ModelMetadata {
 }
 
 enum OpenAIModel: String, CaseIterable {
-    // Latest Codex models (GPT-5.3)
+    // Latest Codex models (GPT-5.4)
+    case gpt54 = "gpt-5.4"
     case gpt53Codex = "gpt-5.3-codex"
     case gpt53CodexSpark = "gpt-5.3-codex-spark"
     
@@ -68,7 +69,6 @@ enum OpenAIModel: String, CaseIterable {
     // GPT-5.1 models
     case gpt51CodexMax = "gpt-5.1-codex-max"
     case gpt51Codex = "gpt-5.1-codex"
-    case gpt51CodexMini = "gpt-5.1-codex-mini"
     case gpt51 = "gpt-5.1"
     
     // GPT-5.0 models (legacy)
@@ -86,12 +86,22 @@ enum OpenAIModel: String, CaseIterable {
     
     var metadata: ModelMetadata {
         switch self {
+        case .gpt54:
+            return ModelMetadata(
+                displayName: "GPT-5.4",
+                description: "Flagship frontier model combining industry-leading coding with stronger reasoning, tool use, and agentic workflows",
+                tier: .plus,
+                isRecommended: true,
+                releaseDate: "2026-03",
+                status: .current,
+                documentationURL: "https://developers.openai.com/codex/models"
+            )
         case .gpt53Codex:
             return ModelMetadata(
                 displayName: "GPT-5.3-Codex",
-                description: "Most capable agentic coding model to date",
+                description: "Industry-leading coding model for complex software engineering. Its coding capabilities now also power GPT-5.4",
                 tier: .plus,
-                isRecommended: true,
+                isRecommended: false,
                 releaseDate: "2026-01",
                 status: .current,
                 documentationURL: "https://developers.openai.com/codex/models#gpt-5-3-codex"
@@ -119,7 +129,7 @@ enum OpenAIModel: String, CaseIterable {
         case .gpt52:
             return ModelMetadata(
                 displayName: "GPT-5.2",
-                description: "Best general agentic model for tasks across domains",
+                description: "Previous general-purpose model for coding and agentic tasks across industries and domains. Succeeded by GPT-5.4",
                 tier: .plus,
                 isRecommended: false,
                 releaseDate: "2025-11",
@@ -139,22 +149,12 @@ enum OpenAIModel: String, CaseIterable {
         case .gpt51Codex:
             return ModelMetadata(
                 displayName: "GPT-5.1-Codex",
-                description: "Optimized for long-running agentic coding tasks",
+                description: "Optimized for long-running, agentic coding tasks in Codex. Succeeded by GPT-5.1-Codex-Max",
                 tier: .plus,
                 isRecommended: false,
                 releaseDate: "2025-08",
                 status: .current,
                 documentationURL: "https://developers.openai.com/codex/models#gpt-5-1-codex"
-            )
-        case .gpt51CodexMini:
-            return ModelMetadata(
-                displayName: "GPT-5.1-Codex-Mini",
-                description: "Smaller, more cost-effective version",
-                tier: .plus,
-                isRecommended: false,
-                releaseDate: "2025-08",
-                status: .current,
-                documentationURL: "https://developers.openai.com/codex/models#gpt-5-1-codex-mini"
             )
         case .gpt51:
             return ModelMetadata(
@@ -179,7 +179,7 @@ enum OpenAIModel: String, CaseIterable {
         case .gpt5CodexMini:
             return ModelMetadata(
                 displayName: "GPT-5-Codex-Mini",
-                description: "Older smaller version, succeeded by GPT-5.1-Codex-Mini",
+                description: "Smaller, more cost-effective version of GPT-5-Codex. Succeeded by GPT-5.1-Codex-Mini",
                 tier: .plus,
                 isRecommended: false,
                 releaseDate: "2025-05",
