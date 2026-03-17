@@ -4,6 +4,7 @@ import AppKit
 /// Right-panel editor for a single AppProfile.
 struct AppProfileEditorView: View {
     @Binding var profile: AppProfile
+    @State private var showAppPicker = false
 
     var body: some View {
         ScrollView {
@@ -105,6 +106,15 @@ struct AppProfileEditorView: View {
                             .buttonStyle(.bordered)
                             .help("Detect the last-triggered app and pre-fill a new matching rule.")
 
+                            Button {
+                                showAppPicker = true
+                            } label: {
+                                Label("Browse Apps", systemImage: "square.grid.2x2")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.bordered)
+                            .help("Pick installed applications to add as matching rules.")
+
                             Spacer()
                         }
                         .padding(.top, 4)
@@ -115,6 +125,9 @@ struct AppProfileEditorView: View {
                 }
             }
             .padding(16)
+        }
+        .sheet(isPresented: $showAppPicker) {
+            AppPickerView(profile: $profile)
         }
     }
 
