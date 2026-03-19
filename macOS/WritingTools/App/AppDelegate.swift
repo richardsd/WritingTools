@@ -441,6 +441,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             defer: false
         )
         settingsWindow?.isReleasedWhenClosed = false
+        settingsWindow?.minSize = NSSize(width: 540, height: 460)
 
         let settingsView =
             SettingsView(appState: appState, showOnlyApiSetup: false)

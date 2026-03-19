@@ -95,9 +95,12 @@ struct SettingsView: View {
             }
             .padding(selectedTab == .profiles || selectedTab == .history ? 0 : 20)
         }
-        .frame(width: selectedTab == .profiles || selectedTab == .history ? 750 : 540,
-               height: showOnlyApiSetup ? 470 : 540)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(
+            minWidth: selectedTab == .profiles || selectedTab == .history ? 750 : 540,
+            maxWidth: .infinity,
+            minHeight: showOnlyApiSetup ? 470 : 540,
+            maxHeight: .infinity
+        )
         .windowBackground(useGradient: settings.useGradientTheme)
         .onAppear(perform: restoreLastTab)
         .onChange(of: selectedTab) { _, newValue in
