@@ -105,11 +105,14 @@ final class HistoryManager {
     private func loadFromDisk() {
         guard let url = storageURL,
               FileManager.default.fileExists(atPath: url.path),
-              let data = try? Data(contentsOf: url),
-              let decoded = try? JSONDecoder().decode([HistoryEntry].self, from: data) else {
+              let data = try? Data(contentsOf: url) else {
             return
         }
-        entries = decoded
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        if let decoded = try? decoder.decode([HistoryEntry].self, from: data) {
+            entries = decoded
+        }
     }
 
     private func saveToDisk() {
