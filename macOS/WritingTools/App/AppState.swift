@@ -112,10 +112,12 @@ final class AppState {
 
         switch providerName {
         case "openai":
+            let authMode = OpenAIAuthMode(rawValue: asettings.openAIAuthMode) ?? .apiKey
             let config = OpenAIConfig(
                 apiKey: asettings.openAIApiKey,
                 baseURL: asettings.openAIBaseURL,
-                model: model
+                model: model,
+                authMode: authMode
             )
             return OpenAIProvider(config: config)
 
@@ -181,10 +183,12 @@ final class AppState {
         self.geminiProvider = GeminiProvider(config: geminiConfig)
 
         // Initialize OpenAI
+        let authMode = OpenAIAuthMode(rawValue: asettings.openAIAuthMode) ?? .apiKey
         let openAIConfig = OpenAIConfig(
             apiKey: asettings.openAIApiKey,
             baseURL: asettings.openAIBaseURL,
-            model: asettings.openAIModel
+            model: asettings.openAIModel,
+            authMode: authMode
         )
         self.openAIProvider = OpenAIProvider(config: openAIConfig)
 
@@ -261,7 +265,8 @@ final class AppState {
         asettings.openAIProject = project
         asettings.openAIModel = model
 
-        let config = OpenAIConfig(apiKey: apiKey, baseURL: baseURL, model: model)
+        let authMode = OpenAIAuthMode(rawValue: asettings.openAIAuthMode) ?? .apiKey
+        let config = OpenAIConfig(apiKey: apiKey, baseURL: baseURL, model: model, authMode: authMode)
         openAIProvider = OpenAIProvider(config: config)
     }
 
@@ -328,7 +333,7 @@ final class AppState {
 
         Task {
             do {
-                let prompt = command.prompt
+                let prompt = AppProfileService.shared.enrichSystemPrompt(command.prompt, for: previousApplication)
 
                 // Get the appropriate provider for this command (respects per-command overrides)
                 let provider = getProvider(for: command)
@@ -346,6 +351,22 @@ final class AppState {
                     result += "\n"
                     logger.debug("Added trailing newline to match input")
                 }
+
+                // Record to history
+                let capturedInput = selectedText
+                let capturedApp = previousApplication
+                let matchedProfile = capturedApp.map {
+                    AppProfileService.shared.resolveProfile(for: ActiveAppContext(from: $0))
+                } ?? nil
+                HistoryManager.shared.record(
+                    commandName: command.name,
+                    commandId: command.id,
+                    inputText: capturedInput,
+                    outputText: result,
+                    modelName: provider.modelDisplayName.isEmpty ? nil : provider.modelDisplayName,
+                    sourceApp: capturedApp,
+                    matchedProfileName: matchedProfile?.name
+                )
 
                 if command.useResponseWindow {
                     let window = ResponseWindow(

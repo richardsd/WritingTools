@@ -32,10 +32,14 @@ Note: Streaming has been fully removed throughout the code.
 """
 
 import base64
+import json
 import logging
+import threading
 import webbrowser
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Optional
+
+import requests
 
 # External libraries
 import google.generativeai as genai
@@ -45,6 +49,9 @@ from openai import OpenAI
 from PySide6 import QtWidgets
 from PySide6.QtWidgets import QVBoxLayout
 from ui.UIUtils import colorMode
+
+import codex_auth
+from codex_callback_server import CodexCallbackServer
 
 # Obfuscation prefix to identify encrypted API keys
 _OBFUSCATION_PREFIX = "enc:"
@@ -309,6 +316,11 @@ class AIProvider(ABC):
         """
         pass
 
+    @property
+    def model_display_name(self) -> str:
+        """Return a human-readable model name for history tracking."""
+        return ""
+
     @abstractmethod
     def cancel(self):
         """
@@ -327,6 +339,10 @@ class GeminiProvider(AIProvider):
     def __init__(self, app):
         self.close_requested = False
         self.model = None
+
+    @property
+    def model_display_name(self) -> str:
+        return getattr(self, "model_name", "")
 
         settings = [
             TextSetting(name="api_key", display_name="API Key", description="Paste your Gemini API key here"),
@@ -445,6 +461,10 @@ class OpenAICompatibleProvider(AIProvider):
     def __init__(self, app):
         self.close_requested = None
         self.client = None
+
+    @property
+    def model_display_name(self) -> str:
+        return getattr(self, "api_model", "")
 
         settings = [
             TextSetting(name="api_key", display_name="API Key", description="API key for the OpenAI-compatible API."),
@@ -567,6 +587,10 @@ class OllamaProvider(AIProvider):
             self.app.output_ready_signal.emit("An error occurred during Ollama chat.")
             return ""
 
+    @property
+    def model_display_name(self) -> str:
+        return getattr(self, "api_model", "")
+
     def after_load(self):
         self.client = OllamaClient(host=self.api_base)
 
@@ -575,3 +599,277 @@ class OllamaProvider(AIProvider):
 
     def cancel(self):
         self.close_requested = True
+
+
+class CodexProvider(AIProvider):
+    """
+    Provider for OpenAI Codex via ChatGPT OAuth or API key.
+
+    Supports two auth modes:
+    - api_key: standard OpenAI-compatible v1/chat/completions
+    - oauth: ChatGPT OAuth → chatgpt.com/backend-api/codex/responses
+    """
+    def __init__(self, app):
+        self.close_requested = False
+        self.client = None
+        self._oauth_tokens: Optional[codex_auth.OAuthTokens] = None
+        self._callback_server: Optional[CodexCallbackServer] = None
+
+        settings = [
+            DropdownSetting(
+                name="auth_mode",
+                display_name="Auth Mode",
+                default_value="oauth",
+                description="How to authenticate with OpenAI",
+                options=[
+                    ("ChatGPT OAuth (Free)", "oauth"),
+                    ("API Key", "api_key"),
+                ],
+            ),
+            TextSetting(name="api_key", display_name="API Key",
+                        description="API key (only for API Key mode)"),
+            TextSetting("api_base", "API Base URL", "https://api.openai.com/v1",
+                        "E.g. https://api.openai.com/v1"),
+            TextSetting("api_model", "API Model", "gpt-4o-mini",
+                        "E.g. gpt-4o-mini"),
+        ]
+        super().__init__(app, "OpenAI Codex", settings,
+            "• Use your ChatGPT account via OAuth (free!) or an API key.\n"
+            "• OAuth uses the Codex Responses API through your ChatGPT subscription.",
+            "openai", "OpenAI Help",
+            lambda: webbrowser.open("https://platform.openai.com/account/api-keys"))
+
+    # ── Auth mode helpers ────────────────────────────────────────
+
+    def _is_oauth_mode(self) -> bool:
+        return getattr(self, "auth_mode", "oauth") == "oauth"
+
+    @property
+    def model_display_name(self) -> str:
+        return getattr(self, "api_model", "")
+
+    # ── OAuth flow ───────────────────────────────────────────────
+
+    def initiate_oauth(self):
+        """Open the browser for ChatGPT OAuth login (run in a thread)."""
+        pkce = codex_auth.generate_pkce()
+        state = codex_auth.generate_state()
+        authorize_url = codex_auth.build_authorize_url(pkce, state)
+
+        webbrowser.open(authorize_url)
+
+        def _run():
+            try:
+                server = CodexCallbackServer()
+                self._callback_server = server
+                code = server.wait_for_code(expected_state=state)
+                tokens = codex_auth.exchange_code_for_tokens(code, pkce.verifier)
+                self._oauth_tokens = tokens
+                self._save_oauth_tokens(tokens)
+                logging.info("Codex OAuth login succeeded")
+                self.app.show_message_signal.emit("Success", "Signed in to ChatGPT successfully!")
+            except Exception as e:
+                logging.error(f"OAuth flow failed: {e}")
+                self.app.show_message_signal.emit("OAuth Error", str(e))
+            finally:
+                self._callback_server = None
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def sign_out(self):
+        """Clear stored OAuth tokens."""
+        self._oauth_tokens = None
+        if "openai_oauth" in self.app.config:
+            del self.app.config["openai_oauth"]
+            self.app.save_config(self.app.config)
+        logging.info("Codex OAuth signed out")
+
+    @property
+    def is_signed_in(self) -> bool:
+        return self._oauth_tokens is not None
+
+    # ── Token persistence ────────────────────────────────────────
+
+    def _save_oauth_tokens(self, tokens: codex_auth.OAuthTokens):
+        d = tokens.to_dict()
+        d["access_token"] = obfuscate_api_key(d["access_token"])
+        d["refresh_token"] = obfuscate_api_key(d["refresh_token"])
+        self.app.config["openai_oauth"] = d
+        self.app.save_config(self.app.config)
+
+    def _load_oauth_tokens(self):
+        d = self.app.config.get("openai_oauth")
+        if not d:
+            return
+        try:
+            d = d.copy()
+            d["access_token"] = deobfuscate_api_key(d["access_token"])
+            d["refresh_token"] = deobfuscate_api_key(d["refresh_token"])
+            self._oauth_tokens = codex_auth.OAuthTokens.from_dict(d)
+        except Exception as e:
+            logging.warning(f"Failed to load OAuth tokens: {e}")
+            self._oauth_tokens = None
+
+    def _ensure_valid_token(self) -> str:
+        """Return a valid access token, refreshing if needed."""
+        if self._oauth_tokens is None:
+            raise RuntimeError("Not signed in. Please sign in first.")
+        if self._oauth_tokens.is_expiring_soon:
+            logging.debug("Refreshing Codex access token")
+            new_tokens = codex_auth.refresh_access_token(self._oauth_tokens.refresh_token)
+            self._oauth_tokens = new_tokens
+            self._save_oauth_tokens(new_tokens)
+        return self._oauth_tokens.access_token
+
+    # ── get_response ─────────────────────────────────────────────
+
+    def get_response(self, system_instruction: str, prompt: str | list, return_response: bool = False) -> str:
+        self.close_requested = False
+
+        if self._is_oauth_mode():
+            return self._get_response_oauth(system_instruction, prompt, return_response)
+        else:
+            return self._get_response_api_key(system_instruction, prompt, return_response)
+
+    def _get_response_api_key(self, system_instruction: str, prompt: str | list, return_response: bool) -> str:
+        """Standard OpenAI chat completions."""
+        if isinstance(prompt, list):
+            messages = prompt
+        else:
+            messages = [
+                {"role": "system", "content": system_instruction},
+                {"role": "user", "content": prompt},
+            ]
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.api_model, messages=messages, temperature=0.5, stream=False
+            )
+            response_text = response.choices[0].message.content.strip()
+            if not return_response and not hasattr(self.app, "current_response_window"):
+                self.app.output_ready_signal.emit(response_text)
+            return response_text
+        except Exception as e:
+            logging.error(f"Codex API key error: {e}")
+            self.app.show_message_signal.emit("Error", str(e))
+            return ""
+
+    def _get_response_oauth(self, system_instruction: str, prompt: str | list, return_response: bool) -> str:
+        """Codex Responses API via OAuth."""
+        try:
+            access_token = self._ensure_valid_token()
+        except Exception as e:
+            self.app.show_message_signal.emit("Auth Error", str(e))
+            return ""
+
+        # Build the Codex-format request body
+        if isinstance(prompt, list):
+            codex_input = []
+            for msg in prompt:
+                codex_input.append({"type": "input_text", "text": msg.get("content", "")})
+        else:
+            codex_input = [{"type": "input_text", "text": prompt}]
+
+        body = {
+            "model": self.api_model,
+            "input": codex_input,
+            "stream": True,
+            "store": False,
+        }
+        if system_instruction:
+            body["instructions"] = system_instruction
+
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            resp = requests.post(
+                codex_auth.RESPONSES_ENDPOINT,
+                json=body,
+                headers=headers,
+                stream=True,
+                timeout=120,
+            )
+
+            if not resp.ok:
+                error_text = resp.text[:500]
+                logging.error(f"Codex API error: {resp.status_code} — {error_text}")
+                self.app.show_message_signal.emit("API Error", f"HTTP {resp.status_code}: {error_text}")
+                return ""
+
+            # Parse SSE response
+            full_text = ""
+            for line in resp.iter_lines(decode_unicode=True):
+                if self.close_requested:
+                    break
+                if not line or not line.startswith("data: "):
+                    continue
+                json_str = line[6:]
+                if json_str == "[DONE]":
+                    break
+                try:
+                    event = json.loads(json_str)
+                    event_type = event.get("type", "")
+
+                    if event_type == "response.output_text.delta":
+                        full_text += event.get("delta", "")
+                    elif event_type in ("response.completed", "response.incomplete"):
+                        final = event.get("response", {}).get("output_text", "")
+                        if final:
+                            full_text = final
+                        break
+                    elif event_type == "error":
+                        error_msg = event.get("message", "Unknown error")
+                        logging.error(f"Codex stream error: {error_msg}")
+                        self.app.show_message_signal.emit("Codex Error", error_msg)
+                        return ""
+                except json.JSONDecodeError:
+                    continue
+
+            response_text = full_text.strip()
+            if not return_response and not hasattr(self.app, "current_response_window"):
+                self.app.output_ready_signal.emit(response_text)
+            return response_text
+
+        except Exception as e:
+            logging.error(f"Codex OAuth request error: {e}")
+            self.app.show_message_signal.emit("Error", str(e))
+            return ""
+
+    # ── Config lifecycle ─────────────────────────────────────────
+
+    def load_config(self, config: dict):
+        if "api_key" in config:
+            config = config.copy()
+            config["api_key"] = deobfuscate_api_key(config["api_key"])
+        super().load_config(config)
+        self._load_oauth_tokens()
+
+    def save_config(self):
+        config = {}
+        for setting in self.settings:
+            value = setting.get_value()
+            if setting.name == "api_key":
+                value = obfuscate_api_key(value)
+            config[setting.name] = value
+        self.app.config["providers"][self.provider_name] = config
+        self.app.save_config(self.app.config)
+
+    def after_load(self):
+        if not self._is_oauth_mode():
+            self.client = OpenAI(
+                api_key=getattr(self, "api_key", ""),
+                base_url=getattr(self, "api_base", "https://api.openai.com/v1"),
+            )
+        else:
+            self.client = None
+
+    def before_load(self):
+        self.client = None
+
+    def cancel(self):
+        self.close_requested = True
+        if self._callback_server:
+            self._callback_server.stop()

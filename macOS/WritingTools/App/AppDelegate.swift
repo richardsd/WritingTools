@@ -105,6 +105,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         appState.activeProvider.cancel()
 
         Task { @MainActor in
+            // Check accessibility permissions first
+            let hasAccessibility = AXIsProcessTrusted()
+            if !hasAccessibility {
+                logger.error("Accessibility permissions not granted! Cannot simulate Cmd+C. Please grant accessibility permissions in System Settings.")
+                
+                // Show alert to user
+                let alert = NSAlert()
+                alert.messageText = "Accessibility Permission Required"
+                alert.informativeText = "Writing Tools needs accessibility permission to capture selected text. Please enable it in System Settings > Privacy & Security > Accessibility."
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: "Open System Settings")
+                alert.addButton(withTitle: "Cancel")
+                
+                if alert.runModal() == .alertFirstButtonReturn {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                return
+            }
+            
             // Store the previous app BEFORE any operations
             let previousApp = NSWorkspace.shared.frontmostApplication
 
@@ -227,7 +248,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let provider = appState.getProvider(for: command)
 
             var result = try await provider.processText(
-                systemPrompt: command.prompt,
+                systemPrompt: AppProfileService.shared.enrichSystemPrompt(command.prompt, for: appState.previousApplication),
                 userPrompt: appState.selectedText,
                 images: appState.selectedImages,
                 streaming: false
@@ -239,6 +260,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if originalText.hasSuffix("\n") && !result.hasSuffix("\n") {
                 result += "\n"
                 logger.debug("Added trailing newline to match input")
+            }
+
+            // Record to history
+            let capturedApp = appState.previousApplication
+            let matchedProfile = capturedApp.map {
+                AppProfileService.shared.resolveProfile(for: ActiveAppContext(from: $0))
+            } ?? nil
+            await MainActor.run {
+                HistoryManager.shared.record(
+                    commandName: command.name,
+                    commandId: command.id,
+                    inputText: originalText,
+                    outputText: result,
+                    modelName: provider.modelDisplayName.isEmpty ? nil : provider.modelDisplayName,
+                    sourceApp: capturedApp,
+                    matchedProfileName: matchedProfile?.name
+                )
             }
 
             await MainActor.run {

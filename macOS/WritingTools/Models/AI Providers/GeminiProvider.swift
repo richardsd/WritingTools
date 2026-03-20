@@ -36,6 +36,8 @@ final class GeminiProvider: AIProvider {
     private var aiProxyService: GeminiService?
     private var currentTask: Task<Void, Never>?
     
+    var modelDisplayName: String { config.modelName }
+
     init(config: GeminiConfig) {
         self.config = config
         setupAIProxyService()

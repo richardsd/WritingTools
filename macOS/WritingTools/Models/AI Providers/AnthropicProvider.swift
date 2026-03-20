@@ -30,7 +30,9 @@ enum AnthropicModel: String, CaseIterable {
 @Observable
 final class AnthropicProvider: AIProvider {
     var isProcessing = false
-    
+
+    var modelDisplayName: String { config.model }
+
     private var config: AnthropicConfig
     private var aiProxyService: AnthropicService?
     private var currentTask: Task<Void, Never>?

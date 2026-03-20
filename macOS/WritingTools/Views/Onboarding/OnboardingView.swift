@@ -10,6 +10,13 @@ import ApplicationServices
   @State private var isScreenRecordingGranted =
     OnboardingPermissionsHelper.checkScreenRecording()
   @State private var wantsScreenshotOCR = false
+  
+  init(appState: AppState) {
+    self.appState = appState
+    // Log initial permission status
+    let accessGranted = AXIsProcessTrusted()
+    print("🔐 OnboardingView init - Accessibility granted: \(accessGranted)")
+  }
 
   private let steps = [
     OnboardingStep(
@@ -63,9 +70,9 @@ import ApplicationServices
             OnboardingWelcomeStep()
           case 1:
             OnboardingPermissionsStep(
-              isAccessibilityGranted: isAccessibilityGranted,
-              isScreenRecordingGranted: isScreenRecordingGranted,
-              wantsScreenshotOCR: wantsScreenshotOCR,
+              isAccessibilityGranted: $isAccessibilityGranted,
+              isScreenRecordingGranted: $isScreenRecordingGranted,
+              wantsScreenshotOCR: $wantsScreenshotOCR,
               onRefresh: refreshPermissionStatuses,
               onOpenPrivacyPane: openPrivacyPane
             )
@@ -141,7 +148,13 @@ import ApplicationServices
   }
 
   private func refreshPermissionStatuses() {
+    let wasGranted = isAccessibilityGranted
     isAccessibilityGranted = AXIsProcessTrusted()
+    
+    if isAccessibilityGranted != wasGranted {
+      print("🔄 Accessibility permission changed: \(wasGranted) → \(isAccessibilityGranted)")
+    }
+    
     isScreenRecordingGranted =
       OnboardingPermissionsHelper.checkScreenRecording()
   }

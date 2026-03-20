@@ -120,6 +120,49 @@ class KeychainManager {
         for keyName in apiKeyNames {
             try? delete(forKey: keyName)
         }
+        
+        // Also clear OAuth tokens
+        try? deleteOAuthTokens()
+    }
+    
+    // MARK: - OAuth Token Management
+    
+    func saveOAuthTokens(_ tokens: OAuthTokens) throws {
+        try save(tokens.accessToken, forKey: "openai_oauth_access_token")
+        try save(tokens.refreshToken, forKey: "openai_oauth_refresh_token")
+        
+        let expiresAtString = String(tokens.expiresAt.timeIntervalSince1970)
+        try save(expiresAtString, forKey: "openai_oauth_expires_at")
+        
+        if let accountId = tokens.accountId {
+            try save(accountId, forKey: "openai_oauth_account_id")
+        }
+    }
+    
+    func retrieveOAuthTokens() throws -> OAuthTokens? {
+        guard let accessToken = try retrieve(forKey: "openai_oauth_access_token"),
+              let refreshToken = try retrieve(forKey: "openai_oauth_refresh_token"),
+              let expiresAtString = try retrieve(forKey: "openai_oauth_expires_at"),
+              let expiresAtTimestamp = TimeInterval(expiresAtString) else {
+            return nil
+        }
+        
+        let expiresAt = Date(timeIntervalSince1970: expiresAtTimestamp)
+        let accountId = try? retrieve(forKey: "openai_oauth_account_id")
+        
+        return OAuthTokens(
+            accessToken: accessToken,
+            refreshToken: refreshToken,
+            expiresAt: expiresAt,
+            accountId: accountId
+        )
+    }
+    
+    func deleteOAuthTokens() throws {
+        try? delete(forKey: "openai_oauth_access_token")
+        try? delete(forKey: "openai_oauth_refresh_token")
+        try? delete(forKey: "openai_oauth_expires_at")
+        try? delete(forKey: "openai_oauth_account_id")
     }
     
     func hasMigratedKey(forKey key: String) -> Bool {

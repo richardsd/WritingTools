@@ -14,7 +14,10 @@ import ui.CustomPopupWindow
 import ui.OnboardingWindow
 import ui.ResponseWindow
 import ui.SettingsWindow
-from aiprovider import GeminiProvider, OllamaProvider, OpenAICompatibleProvider, obfuscate_api_key
+from aiprovider import CodexProvider, GeminiProvider, OllamaProvider, OpenAICompatibleProvider, obfuscate_api_key
+from active_app import get_active_app_context
+from app_profile_service import AppProfileService
+from history_manager import HistoryManager
 from pynput import keyboard as pykeyboard
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QLocale, Signal, Slot
@@ -72,7 +75,12 @@ class WritingToolApp(QtWidgets.QApplication):
         self.setup_ctrl_c_listener()
 
         # Setup available AI providers
-        self.providers = [GeminiProvider(self), OpenAICompatibleProvider(self), OllamaProvider(self)]
+        self.providers = [GeminiProvider(self), OpenAICompatibleProvider(self), OllamaProvider(self), CodexProvider(self)]
+
+        # Initialize profile and history services
+        self.profile_service = AppProfileService.shared()
+        self.history_manager = HistoryManager.shared()
+        self.last_active_app_context = None
 
         if not self.config:
             logging.debug('No config found, showing onboarding')
@@ -318,6 +326,10 @@ class WritingToolApp(QtWidgets.QApplication):
         Handle the hotkey press event.
         """
         logging.debug('Hotkey pressed')
+
+        # Capture the active app BEFORE showing the popup
+        self.last_active_app_context = get_active_app_context()
+        logging.debug(f'Active app: {self.last_active_app_context.app_name}')
         
         # Check for spam triggers
         if self.check_trigger_spam():
@@ -493,6 +505,15 @@ class WritingToolApp(QtWidgets.QApplication):
                     else:
                         prompt = f"{prompt_prefix}{selected_text}"
 
+                # Enrich system instruction with app-aware profile
+                app_ctx = self.last_active_app_context
+                matched_profile_name = ""
+                if app_ctx:
+                    profile = self.profile_service.resolve_profile(app_ctx)
+                    if profile:
+                        matched_profile_name = profile.name
+                    system_instruction = self.profile_service.enrich_system_instruction(system_instruction, app_ctx)
+
                 self.output_queue = ""
 
                 logging.debug(f'Getting response from provider for option: {option}')
@@ -501,6 +522,17 @@ class WritingToolApp(QtWidgets.QApplication):
                     logging.debug('Getting response for window display')
                     response = self.current_provider.get_response(system_instruction, prompt, return_response=True)
                     logging.debug(f'Got response of length: {len(response) if response else 0}')
+                    
+                    # Record history
+                    if self.config.get('is_history_enabled', True) and response:
+                        self.history_manager.record(
+                            command_name=option,
+                            input_text=selected_text or custom_change or "",
+                            output_text=response,
+                            model_name=getattr(self.current_provider, 'model_display_name', ''),
+                            source_app_name=app_ctx.app_name if app_ctx else "",
+                            matched_profile_name=matched_profile_name,
+                        )
                     
                     # For custom prompts with no text, add question to chat history
                     if option == 'Custom' and not selected_text.strip():
@@ -521,7 +553,22 @@ class WritingToolApp(QtWidgets.QApplication):
                         logging.debug('Invoked set_text on response window')
                 else:
                     logging.debug('Getting response for direct replacement')
-                    self.current_provider.get_response(system_instruction, prompt)
+                    response = self.current_provider.get_response(system_instruction, prompt, return_response=True)
+                    
+                    # Record history
+                    if self.config.get('is_history_enabled', True) and response:
+                        self.history_manager.record(
+                            command_name=option,
+                            input_text=selected_text,
+                            output_text=response,
+                            model_name=getattr(self.current_provider, 'model_display_name', ''),
+                            source_app_name=app_ctx.app_name if app_ctx else "",
+                            matched_profile_name=matched_profile_name,
+                        )
+                    
+                    # Emit for text replacement
+                    if response and not hasattr(self.app if hasattr(self, 'app') else self, 'current_response_window'):
+                        self.output_ready_signal.emit(response)
                     logging.debug('Response processed')
 
             except Exception as e:
