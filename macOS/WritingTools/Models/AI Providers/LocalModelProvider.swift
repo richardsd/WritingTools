@@ -2,7 +2,6 @@ import MLX
 import MLXVLM
 import MLXLLM
 import MLXLMCommon
-import MLXRandom
 import SwiftUI
 import Observation
 import Hub
@@ -803,7 +802,7 @@ class LocalModelProvider {
         userPrompt: String,
         streaming: Bool
     ) async throws -> String {
-        MLXRandom.seed(UInt64(Date.timeIntervalSinceReferenceDate * 1000))
+        MLX.seed(UInt64(Date.timeIntervalSinceReferenceDate * 1000))
 
         // Use Chat.Message format for proper chat template application
         var messages: [Chat.Message] = []
@@ -833,7 +832,7 @@ class LocalModelProvider {
         images: [Data],
         streaming: Bool
     ) async throws -> String {
-        MLXRandom.seed(UInt64(Date.timeIntervalSinceReferenceDate * 1000))
+        MLX.seed(UInt64(Date.timeIntervalSinceReferenceDate * 1000))
         
         // Create temporary URLs for images with optimized format handling
         let imageURLs = try images.compactMap { imageData -> URL? in

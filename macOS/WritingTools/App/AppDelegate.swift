@@ -129,6 +129,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // Store the previous app BEFORE any operations
             let previousApp = NSWorkspace.shared.frontmostApplication
 
+            // Capture selection bounds before we touch the clipboard
+            self.appState.selectedTextScreenBounds = self.selectedTextScreenBounds()
+
             let pb = NSPasteboard.general
             let oldChangeCount = pb.changeCount
 
@@ -239,14 +242,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         appState.isProcessing = true
 
+        // Get the appropriate provider for this command (respects per-command overrides)
+        let provider = appState.getProvider(for: command)
+
+        // Show processing HUD for visual feedback
+        WindowManager.shared.showProcessingHUD(
+            commandName: command.name,
+            commandIcon: command.icon,
+            onCancel: { [weak self] in
+                provider.cancel()
+                self?.appState.isProcessing = false
+            }
+        )
+
         defer {
             appState.isProcessing = false
+            WindowManager.shared.dismissProcessingHUD()
         }
 
         do {
-            // Get the appropriate provider for this command (respects per-command overrides)
-            let provider = appState.getProvider(for: command)
-
             var result = try await provider.processText(
                 systemPrompt: AppProfileService.shared.enrichSystemPrompt(command.prompt, for: appState.previousApplication),
                 userPrompt: appState.selectedText,
@@ -520,6 +534,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self.appState.previousApplication = frontApp
             }
 
+            // Capture selection bounds before we switch apps or touch the clipboard
+            self.appState.selectedTextScreenBounds = self.selectedTextScreenBounds()
+
             self.closePopupWindow()
 
             let pb = NSPasteboard.general
@@ -620,6 +637,45 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func closePopupWindow() {
         WindowManager.shared.dismissPopup()
+    }
+
+    // MARK: - Accessibility: selected text screen position
+
+    /// Returns the screen rect (AppKit coords, bottom-left origin) of the currently
+    /// selected text in the frontmost app via the Accessibility API.
+    /// Returns nil if unavailable (e.g. app doesn't support AX text attributes).
+    private func selectedTextScreenBounds() -> NSRect? {
+        let systemWide = AXUIElementCreateSystemWide()
+        var focusedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            systemWide, kAXFocusedUIElementAttribute as CFString, &focusedRef
+        ) == .success, let focusedRef else { return nil }
+
+        let focused = focusedRef as! AXUIElement
+
+        var rangeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            focused, kAXSelectedTextRangeAttribute as CFString, &rangeRef
+        ) == .success, let rangeRef else { return nil }
+
+        var boundsRef: CFTypeRef?
+        guard AXUIElementCopyParameterizedAttributeValue(
+            focused,
+            kAXBoundsForRangeParameterizedAttribute as CFString,
+            rangeRef,
+            &boundsRef
+        ) == .success, let boundsRef else { return nil }
+
+        var quartzRect = CGRect.zero
+        guard AXValueGetValue(boundsRef as! AXValue, .cgRect, &quartzRect),
+              !quartzRect.isEmpty,
+              let mainScreen = NSScreen.main
+        else { return nil }
+
+        // Quartz uses top-left origin; AppKit uses bottom-left — flip Y.
+        let flippedY = mainScreen.frame.height - quartzRect.origin.y - quartzRect.height
+        return NSRect(x: quartzRect.origin.x, y: flippedY,
+                      width: quartzRect.width, height: quartzRect.height)
     }
 
     func windowWillClose(_ notification: Notification) {

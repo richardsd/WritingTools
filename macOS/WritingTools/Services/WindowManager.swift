@@ -15,6 +15,9 @@ class WindowManager: NSObject, NSWindowDelegate {
     private weak var popupWindow: PopupWindow?
 
     private var responseWindows = NSHashTable<ResponseWindow>.weakObjects()
+
+    // Track the processing HUD
+    private weak var processingHUD: ProcessingHUDWindow?
     
     private var cleanupTimer: Timer?
 
@@ -79,6 +82,33 @@ class WindowManager: NSObject, NSWindowDelegate {
 
         // Preserve previous behavior: clear selected images on popup close.
         AppState.shared.selectedImages = []
+    }
+
+    // MARK: - Processing HUD
+
+    @MainActor
+    func showProcessingHUD(commandName: String, commandIcon: String, onCancel: @escaping () -> Void) {
+        // Dismiss any existing HUD first
+        dismissProcessingHUD()
+
+        let hud = ProcessingHUDWindow(
+            commandName: commandName,
+            commandIcon: commandIcon,
+            anchorRect: AppState.shared.selectedTextScreenBounds,
+            onCancel: { [weak self] in
+                onCancel()
+                self?.dismissProcessingHUD()
+            }
+        )
+        processingHUD = hud
+        hud.orderFrontRegardless()
+    }
+
+    @MainActor
+    func dismissProcessingHUD() {
+        guard let hud = processingHUD else { return }
+        processingHUD = nil
+        hud.dismiss()
     }
 
     // MARK: - Onboarding & Settings
@@ -208,6 +238,10 @@ class WindowManager: NSObject, NSWindowDelegate {
             windows.append(popup)
         }
 
+        if let hud = processingHUD {
+            windows.append(hud)
+        }
+
         windows.append(contentsOf: responseWindows.allObjects)
         return windows
     }
@@ -219,6 +253,7 @@ class WindowManager: NSObject, NSWindowDelegate {
             self.settingsWindow.removeAllObjects()
             self.responseWindows.removeAllObjects()
             self.popupWindow = nil
+            self.processingHUD = nil
         }
     }
 

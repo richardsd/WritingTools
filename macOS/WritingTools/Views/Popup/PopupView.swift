@@ -202,12 +202,24 @@ struct PopupView: View {
 
     appState.isProcessing = true
 
+    // Close the popup and show HUD for feedback
+    let provider = appState.getProvider(for: command)
+    closeAction()
+
+    await MainActor.run {
+      WindowManager.shared.showProcessingHUD(
+        commandName: command.name,
+        commandIcon: command.icon,
+        onCancel: { [weak appState] in
+          provider.cancel()
+          appState?.isProcessing = false
+        }
+      )
+    }
+
     do {
       let systemPrompt = command.prompt
       let userText = appState.selectedText
-
-      // Get the appropriate provider for this command (respects per-command overrides)
-      let provider = appState.getProvider(for: command)
 
       let result = try await provider.processText(
         systemPrompt: systemPrompt,
@@ -217,6 +229,8 @@ struct PopupView: View {
       )
 
       await MainActor.run {
+        WindowManager.shared.dismissProcessingHUD()
+
         if command.useResponseWindow {
           let window = ResponseWindow(
             title: command.name,
@@ -237,12 +251,12 @@ struct PopupView: View {
           }
         }
 
-        closeAction()
         processingCommandId = nil
       }
     } catch {
       logger.error("Error processing command: \(error.localizedDescription)")
       await MainActor.run {
+        WindowManager.shared.dismissProcessingHUD()
         errorMessage = error.localizedDescription
         showingErrorAlert = true
         processingCommandId = nil
@@ -266,6 +280,17 @@ struct PopupView: View {
 
     // Capture setting value once at the start
     let openInResponseWindow = AppSettings.shared.openCustomCommandsInResponseWindow
+
+    // Close popup and show HUD
+    closeAction()
+    WindowManager.shared.showProcessingHUD(
+      commandName: "Custom Instruction",
+      commandIcon: "text.bubble",
+      onCancel: { [weak appState] in
+        appState?.activeProvider.cancel()
+        appState?.isProcessing = false
+      }
+    )
 
     Task {
       do {
@@ -298,6 +323,8 @@ struct PopupView: View {
         )
 
         await MainActor.run {
+          WindowManager.shared.dismissProcessingHUD()
+
           if openInResponseWindow {
             let window = ResponseWindow(
               title: "AI Response",
@@ -317,11 +344,11 @@ struct PopupView: View {
 
           customText = ""
           isCustomLoading = false
-          closeAction()
         }
       } catch {
         logger.error("Error processing text: \(error.localizedDescription)")
         await MainActor.run {
+          WindowManager.shared.dismissProcessingHUD()
           errorMessage = error.localizedDescription
           showingErrorAlert = true
           isCustomLoading = false

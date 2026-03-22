@@ -33,6 +33,10 @@ final class AppState {
 
     var selectedAttributedText: NSAttributedString? = nil
 
+    // Screen bounds of the text selection (AppKit coords), captured before command runs.
+    // Used to anchor the processing HUD near the selected text.
+    var selectedTextScreenBounds: NSRect? = nil
+
     var activeProvider: any AIProvider {
         switch currentProvider {
         case "openai":
