@@ -7,7 +7,9 @@ struct CommandButton: View {
     let onTap: () -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
-    
+
+    @State private var isHovered = false
+
     var body: some View {
         ZStack {
             // Main button wrapper
@@ -27,6 +29,7 @@ struct CommandButton: View {
                         Image(systemName: command.icon)
                         Text(command.name)
                             .lineLimit(1)
+                            .minimumScaleFactor(0.85)
                             .truncationMode(.tail)
                     }
                     
@@ -45,14 +48,20 @@ struct CommandButton: View {
                         Color.clear
                             .glassEffect(.regular, in: .rect(cornerRadius: 8))
                     } else {
-                        // Fallback for older macOS versions
-                        Color(.controlBackgroundColor)
-                            .clipShape(.rect(cornerRadius: 8))
+                        // Hover-aware background for older macOS
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(isHovered && !isEditing && !isLoading
+                                ? Color(NSColor.selectedControlColor).opacity(0.35)
+                                : Color(.controlBackgroundColor))
+                            .animation(.easeInOut(duration: 0.12), value: isHovered)
                     }
                 }
             }
             .buttonStyle(LoadingButtonStyle(isLoading: isLoading))
             .disabled(isLoading || isEditing)
+            .onHover { hovering in
+                isHovered = hovering
+            }
             
             // Overlay edit controls when in edit mode
             if isEditing {

@@ -18,7 +18,9 @@ struct AppleStyleTextFieldModifier: ViewModifier {
                 content
                     .font(.system(size: 14))
                     .foregroundStyle(colorScheme == .dark ? .white : .primary)
-                    .padding(12)
+                    .padding(.leading, 12)
+                    .padding(.trailing, text.isEmpty ? 12 : 40)
+                    .padding(.vertical, 10)
                     .onSubmit {
                         performSubmitAnimation()
                     }

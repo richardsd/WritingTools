@@ -35,7 +35,7 @@ struct PopupView: View {
   ]
 
   var body: some View {
-    VStack(spacing: 16) {
+    VStack(spacing: 12) {
       // Top bar with buttons
       HStack {
         Button(action: {
@@ -46,16 +46,14 @@ struct PopupView: View {
           }
         }) {
           Image(systemName: "xmark")
-            .font(.body)
+            .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(.secondary)
-            .frame(width: 28, height: 28)
+            .frame(width: 24, height: 24)
             .background(Color(.controlBackgroundColor))
             .clipShape(.circle)
         }
         .buttonStyle(.plain)
         .help(viewModel.isEditMode ? "Exit Edit Mode" : "Close")
-        .padding(.top, 8)
-        .padding(.leading, 8)
 
         Spacer()
 
@@ -69,65 +67,61 @@ struct PopupView: View {
           Image(
             systemName: viewModel.isEditMode ? "checkmark" : "square.and.pencil"
           )
-          .font(.body)
+          .font(.system(size: 11, weight: .semibold))
           .foregroundStyle(.secondary)
-          .frame(width: 28, height: 28)
+          .frame(width: 24, height: 24)
           .background(Color(.controlBackgroundColor))
           .clipShape(.circle)
         }
         .buttonStyle(.plain)
         .help(viewModel.isEditMode ? "Save Changes" : "Edit Commands")
-        .padding(.top, 8)
-        .padding(.trailing, 8)
       }
+      .padding(.horizontal, 10)
+      .padding(.top, 10)
 
       // Custom input with send button
       if !viewModel.isEditMode {
-        HStack(spacing: 8) {
-          TextField(
-            appState.selectedText.isEmpty
-              ? "Describe your change..."
-              : "Describe your change...",
-            text: $customText
-          )
-          .textFieldStyle(.plain)
-          .appleStyleTextField(
-            text: customText,
-            isLoading: isCustomLoading,
-            onSubmit: processCustomChange
-          )
-        }
-        .padding(.horizontal)
+        TextField(
+          "Describe your change...",
+          text: $customText
+        )
+        .textFieldStyle(.plain)
+        .appleStyleTextField(
+          text: customText,
+          isLoading: isCustomLoading,
+          onSubmit: processCustomChange
+        )
+        .padding(.horizontal, 10)
       }
 
       if !appState.selectedText.isEmpty || !appState.selectedImages.isEmpty {
+        Divider()
+          .padding(.horizontal, 10)
+
         // Command buttons grid
-        ScrollView {
-          LazyVGrid(columns: columns, spacing: 8) {
-            ForEach(appState.commandManager.commands) { command in
-              CommandButton(
-                command: command,
-                isEditing: viewModel.isEditMode,
-                isLoading: processingCommandId == command.id,
-                onTap: {
-                  processingCommandId = command.id
-                  Task {
-                    await processCommandAndCloseWhenDone(command)
-                  }
-                },
-                onEdit: {
-                  editingCommand = command
-                },
-                onDelete: {
-                  logger.debug("Deleting command: \(command.name)")
-                  appState.commandManager.deleteCommand(command)
+        LazyVGrid(columns: columns, spacing: 8) {
+          ForEach(appState.commandManager.commands) { command in
+            CommandButton(
+              command: command,
+              isEditing: viewModel.isEditMode,
+              isLoading: processingCommandId == command.id,
+              onTap: {
+                processingCommandId = command.id
+                Task {
+                  await processCommandAndCloseWhenDone(command)
                 }
-              )
-            }
+              },
+              onEdit: {
+                editingCommand = command
+              },
+              onDelete: {
+                logger.debug("Deleting command: \(command.name)")
+                appState.commandManager.deleteCommand(command)
+              }
+            )
           }
-          .padding(.horizontal, 8)
         }
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 16)
       }
 
       if viewModel.isEditMode {
