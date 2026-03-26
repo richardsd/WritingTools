@@ -14,6 +14,7 @@ struct PopupView: View {
   @Bindable var viewModel: PopupViewModel
   @Environment(\.colorScheme) var colorScheme
   @AppStorage("use_gradient_theme") private var useGradientTheme = false
+  @FocusState private var isCustomInputFocused: Bool
 
   @State private var customText: String = ""
   @State private var isCustomLoading: Bool = false
@@ -85,6 +86,7 @@ struct PopupView: View {
           "Describe your change...",
           text: $customText
         )
+        .focused($isCustomInputFocused)
         .textFieldStyle(.plain)
         .appleStyleTextField(
           text: customText,
@@ -183,6 +185,27 @@ struct PopupView: View {
     } message: {
       Text(errorMessage)
     }
+    .task {
+      focusCustomInputIfNeeded()
+    }
+    .onChange(of: viewModel.isEditMode) { _, isEditMode in
+      if isEditMode {
+        isCustomInputFocused = false
+      } else {
+        focusCustomInputIfNeeded()
+      }
+    }
+  }
+
+  @MainActor
+  private func focusCustomInputIfNeeded() {
+    guard !viewModel.isEditMode else { return }
+
+    // Delay focus until the popup window is on screen and key.
+    Task { @MainActor in
+      try? await Task.sleep(for: .milliseconds(100))
+      isCustomInputFocused = true
+    }
   }
 
   // Process a command asynchronously and only close the popup when done
@@ -196,8 +219,28 @@ struct PopupView: View {
 
     appState.isProcessing = true
 
-    // Close the popup and show HUD for feedback
     let provider = appState.getProvider(for: command)
+    let systemPrompt = command.prompt
+    let userText = appState.selectedText
+    let images = appState.selectedImages
+
+    if command.useResponseWindow {
+      await MainActor.run {
+        processingCommandId = nil
+        presentResponseWindow(
+          title: command.name,
+          initialMessages: [],
+          selectedText: userText,
+          option: .proofread,
+          provider: provider,
+          systemPrompt: systemPrompt,
+          userPrompt: userText,
+          images: images
+        )
+      }
+      return
+    }
+
     closeAction()
 
     await MainActor.run {
@@ -212,37 +255,20 @@ struct PopupView: View {
     }
 
     do {
-      let systemPrompt = command.prompt
-      let userText = appState.selectedText
-
       let result = try await provider.processText(
         systemPrompt: systemPrompt,
         userPrompt: userText,
-        images: appState.selectedImages,
+        images: images,
         streaming: false
       )
 
       await MainActor.run {
         WindowManager.shared.dismissProcessingHUD()
 
-        if command.useResponseWindow {
-          let window = ResponseWindow(
-            title: command.name,
-            content: result,
-            selectedText: userText,
-            option: .proofread,
-            provider: provider
-          )
-
-          WindowManager.shared.addResponseWindow(window)
-          window.makeKeyAndOrderFront(nil)
-          window.orderFrontRegardless()
+        if command.preserveFormatting {
+          appState.replaceSelectedTextPreservingAttributes(with: result)
         } else {
-          if command.preserveFormatting {
-            appState.replaceSelectedTextPreservingAttributes(with: result)
-          } else {
-            appState.replaceSelectedText(with: result)
-          }
+          appState.replaceSelectedText(with: result)
         }
 
         processingCommandId = nil
@@ -262,18 +288,64 @@ struct PopupView: View {
     }
   }
 
+  @MainActor
   private func processCustomChange() {
     guard !customText.isEmpty else { return }
     isCustomLoading = true
     processCustomInstruction(customText)
   }
 
+  @MainActor
   private func processCustomInstruction(_ instruction: String) {
     guard !instruction.isEmpty else { return }
     appState.isProcessing = true
 
     // Capture setting value once at the start
     let openInResponseWindow = AppSettings.shared.openCustomCommandsInResponseWindow
+
+    let systemPrompt = """
+    You are a writing and coding assistant. Your sole task is to respond \
+    to the user's instruction thoughtfully and comprehensively.
+    If the instruction is a question, provide a detailed answer. But \
+    always return the best and most accurate answer and not different \
+    options.
+    If it's a request for help, provide clear guidance and examples where \
+    appropriate. Make sure to use the language used or specified by the \
+    user instruction.
+    Use Markdown formatting to make your response more readable.
+    """
+
+    let selectedText = appState.selectedText
+    let images = appState.selectedImages
+    let userPrompt = selectedText.isEmpty
+      ? instruction
+      : """
+        User's instruction: \(instruction)
+
+        Text:
+        \(selectedText)
+        """
+
+    if openInResponseWindow {
+      let initialMessages = selectedText.isEmpty
+        ? [ChatMessage(role: "user", content: instruction)]
+        : []
+
+      presentResponseWindow(
+        title: "AI Response",
+        initialMessages: initialMessages,
+        selectedText: selectedText,
+        option: .proofread,
+        provider: appState.activeProvider,
+        systemPrompt: systemPrompt,
+        userPrompt: userPrompt,
+        images: images
+      )
+
+      customText = ""
+      isCustomLoading = false
+      return
+    }
 
     // Close popup and show HUD
     closeAction()
@@ -288,53 +360,17 @@ struct PopupView: View {
 
     Task {
       do {
-        let systemPrompt = """
-        You are a writing and coding assistant. Your sole task is to respond \
-        to the user's instruction thoughtfully and comprehensively.
-        If the instruction is a question, provide a detailed answer. But \
-        always return the best and most accurate answer and not different \
-        options.
-        If it's a request for help, provide clear guidance and examples where \
-        appropriate. Make sure to use the language used or specified by the \
-        user instruction.
-        Use Markdown formatting to make your response more readable.
-        """
-
-        let userPrompt = appState.selectedText.isEmpty
-          ? instruction
-          : """
-            User's instruction: \(instruction)
-
-            Text:
-            \(appState.selectedText)
-            """
-
         let result = try await appState.activeProvider.processText(
           systemPrompt: systemPrompt,
           userPrompt: userPrompt,
-          images: appState.selectedImages,
+          images: images,
           streaming: false
         )
 
         await MainActor.run {
           WindowManager.shared.dismissProcessingHUD()
 
-          if openInResponseWindow {
-            let window = ResponseWindow(
-              title: "AI Response",
-              content: result,
-              selectedText: appState.selectedText.isEmpty
-                ? instruction : appState.selectedText,
-              option: .proofread,
-              provider: appState.activeProvider
-            )
-
-            WindowManager.shared.addResponseWindow(window)
-            window.makeKeyAndOrderFront(nil)
-            window.orderFrontRegardless()
-          } else {
-            appState.replaceSelectedText(with: result)
-          }
+          appState.replaceSelectedText(with: result)
 
           customText = ""
           isCustomLoading = false
@@ -350,6 +386,46 @@ struct PopupView: View {
       }
 
       appState.isProcessing = false
+    }
+  }
+
+  @MainActor
+  private func presentResponseWindow(
+    title: String,
+    initialMessages: [ChatMessage],
+    selectedText: String,
+    option: WritingOption?,
+    provider: any AIProvider,
+    systemPrompt: String?,
+    userPrompt: String,
+    images: [Data]
+  ) {
+    let viewModel = ResponseViewModel(
+      initialMessages: initialMessages,
+      selectedText: selectedText,
+      option: option,
+      provider: provider,
+      conversationImages: images,
+      baseSystemPrompt: systemPrompt
+    )
+
+    let window = ResponseWindow(title: title, viewModel: viewModel)
+    NSApp.activate(ignoringOtherApps: true)
+    WindowManager.shared.addResponseWindow(window)
+    window.makeKeyAndOrderFront(nil)
+    window.orderFrontRegardless()
+
+    closeAction()
+
+    Task { @MainActor in
+      await Task.yield()
+      viewModel.startInitialResponse(
+        systemPrompt: systemPrompt,
+        userPrompt: userPrompt,
+        images: images
+      ) {
+        appState.isProcessing = false
+      }
     }
   }
 }

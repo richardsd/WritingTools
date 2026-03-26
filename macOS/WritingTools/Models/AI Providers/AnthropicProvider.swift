@@ -171,6 +171,119 @@ final class AnthropicProvider: AIProvider {
             throw error
         }
     }
+
+    func processTextStream(
+        systemPrompt: String?,
+        userPrompt: String,
+        images: [Data]
+    ) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            isProcessing = true
+
+            currentTask = Task { [weak self] in
+                guard let self else {
+                    continuation.finish()
+                    return
+                }
+
+                defer {
+                    self.isProcessing = false
+                    self.currentTask = nil
+                }
+
+                do {
+                    guard !self.config.apiKey.isEmpty else {
+                        throw NSError(
+                            domain: "AnthropicAPI",
+                            code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "API key is missing."]
+                        )
+                    }
+
+                    if self.aiProxyService == nil {
+                        self.setupAIProxyService()
+                    }
+
+                    guard let anthropicService = self.aiProxyService else {
+                        throw NSError(
+                            domain: "AnthropicAPI",
+                            code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "Failed to initialize AIProxy service."]
+                        )
+                    }
+
+                    let selectedModel = self.config.model.isEmpty
+                        ? AnthropicConfig.defaultModel
+                        : self.config.model
+
+                    var contentBlocks: [AnthropicContentBlockParam] = [
+                        .textBlock(.init(text: userPrompt))
+                    ]
+
+                    for imageData in images {
+                        let source = AnthropicImageBlockParamSource.base64(
+                            data: imageData.base64EncodedString(),
+                            mediaType: .jpeg
+                        )
+                        contentBlocks.append(.imageBlock(.init(source: source)))
+                    }
+
+                    let requestBody = AnthropicMessageRequestBody(
+                        maxTokens: 10000,
+                        messages: [
+                            AnthropicMessageParam(
+                                content: .blocks(contentBlocks),
+                                role: .user
+                            )
+                        ],
+                        model: selectedModel,
+                        system: systemPrompt.map(AnthropicSystemPrompt.text)
+                    )
+
+                    let stream = try await anthropicService.streamingMessageRequest(
+                        body: requestBody,
+                        secondsToWait: 60
+                    )
+
+                    for try await event in stream {
+                        if Task.isCancelled {
+                            continuation.finish()
+                            return
+                        }
+
+                        guard case let .contentBlockDelta(contentBlockDelta) = event else {
+                            continue
+                        }
+
+                        switch contentBlockDelta.delta {
+                        case .textDelta(let textDelta):
+                            continuation.yield(textDelta.text)
+                        case .inputJSONDelta, .citationsDelta, .thinkingDelta, .signatureDelta, .futureProof:
+                            continue
+                        }
+                    }
+
+                    continuation.finish()
+                } catch is CancellationError {
+                    continuation.finish()
+                } catch AIProxyError.unsuccessfulRequest(let statusCode, let responseBody) {
+                    logger.error("Anthropic error (\(statusCode)): \(responseBody)")
+                    continuation.finish(throwing: NSError(
+                        domain: "AnthropicAPI",
+                        code: statusCode,
+                        userInfo: [NSLocalizedDescriptionKey: "API error: \(responseBody)"]
+                    ))
+                } catch {
+                    logger.error("Anthropic request failed: \(error.localizedDescription)")
+                    continuation.finish(throwing: error)
+                }
+            }
+
+            continuation.onTermination = { _ in
+                self.currentTask?.cancel()
+            }
+        }
+    }
     
     func cancel() {
         currentTask?.cancel()

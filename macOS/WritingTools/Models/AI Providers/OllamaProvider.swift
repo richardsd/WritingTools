@@ -35,6 +35,7 @@ private struct GenerateChunk: Decodable {
 final class OllamaProvider: AIProvider {
     var isProcessing = false
     private var config: OllamaConfig
+    private var currentTask: Task<Void, Never>?
 
     var modelDisplayName: String { config.model }
 
@@ -114,7 +115,131 @@ final class OllamaProvider: AIProvider {
     }
 
     func cancel() {
+        currentTask?.cancel()
+        currentTask = nil
         isProcessing = false
+    }
+
+    func processTextStream(
+        systemPrompt: String?,
+        userPrompt: String,
+        images: [Data]
+    ) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            isProcessing = true
+
+            currentTask = Task { [weak self] in
+                guard let self else {
+                    continuation.finish()
+                    return
+                }
+
+                defer {
+                    self.isProcessing = false
+                    self.currentTask = nil
+                }
+
+                do {
+                    var combinedPrompt = ""
+
+                    if let systemPrompt,
+                       !systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        combinedPrompt = systemPrompt + "\n\n"
+                    }
+
+                    combinedPrompt += userPrompt
+
+                    var imagesForOllama: [String] = []
+
+                    if !images.isEmpty {
+                        let imageMode = await MainActor.run { AppSettings.shared.ollamaImageMode }
+                        switch imageMode {
+                        case .ocr:
+                            let ocrText = await OCRManager.shared.extractText(from: images)
+                            if !ocrText.isEmpty {
+                                combinedPrompt += "\n\nExtracted Text: \(ocrText)"
+                            }
+                        case .ollama:
+                            imagesForOllama = images.map { $0.base64EncodedString() }
+                        }
+                    }
+
+                    guard let url = self.makeEndpointURL("/generate") else {
+                        throw self.makeClientError(
+                            "Invalid base URL '\(self.config.baseURL)'. Expected like http://localhost:11434 or http://localhost:11434/api"
+                        )
+                    }
+
+                    var body: [String: Any] = [
+                        "model": self.config.model,
+                        "prompt": combinedPrompt,
+                        "stream": true,
+                    ]
+                    if let keepAlive = self.config.keepAlive, !keepAlive.isEmpty {
+                        body["keep_alive"] = keepAlive
+                    }
+                    if !imagesForOllama.isEmpty {
+                        body["images"] = imagesForOllama
+                    }
+
+                    let jsonData = try JSONSerialization.data(withJSONObject: body)
+
+                    var request = URLRequest(url: url)
+                    request.httpMethod = "POST"
+                    request.httpBody = jsonData
+                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+                    let (stream, response) = try await URLSession.shared.bytes(for: request)
+                    guard let http = response as? HTTPURLResponse else {
+                        throw self.makeClientError("Invalid response from server.")
+                    }
+
+                    if http.statusCode != 200 {
+                        var data = Data()
+                        for try await byte in stream {
+                            data.append(byte)
+                        }
+                        let message = self.decodeServerError(from: data)
+                        throw self.makeServerError(http.statusCode, message)
+                    }
+
+                    for try await line in stream.lines {
+                        if Task.isCancelled {
+                            continuation.finish()
+                            return
+                        }
+
+                        guard let data = line.data(using: .utf8) else { continue }
+                        guard let chunk = try? JSONDecoder().decode(GenerateChunk.self, from: data) else {
+                            continue
+                        }
+
+                        if let err = chunk.error, !err.isEmpty {
+                            throw self.makeServerError(500, err)
+                        }
+
+                        if let text = chunk.response, !text.isEmpty {
+                            continuation.yield(text)
+                        }
+
+                        if chunk.done == true {
+                            break
+                        }
+                    }
+
+                    continuation.finish()
+                } catch is CancellationError {
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+
+            continuation.onTermination = { _ in
+                self.currentTask?.cancel()
+            }
+        }
     }
 
     // MARK: - Networking

@@ -321,8 +321,265 @@ final class OpenAIProvider: AIProvider {
             return try await processTextWithOAuth(systemPrompt: systemPrompt, userPrompt: userPrompt, images: images, streaming: streaming)
         }
     }
+
+    func processTextStream(
+        systemPrompt: String?,
+        userPrompt: String,
+        images: [Data]
+    ) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            isProcessing = true
+
+            currentTask = Task { [weak self] in
+                guard let self else {
+                    continuation.finish()
+                    return
+                }
+
+                defer {
+                    self.isProcessing = false
+                    self.currentTask = nil
+                }
+
+                do {
+                    switch self.config.authMode {
+                    case .apiKey:
+                        try await self.streamWithAPIKey(
+                            systemPrompt: systemPrompt,
+                            userPrompt: userPrompt,
+                            images: images,
+                            continuation: continuation
+                        )
+                    case .oauth:
+                        try await self.streamWithOAuth(
+                            systemPrompt: systemPrompt,
+                            userPrompt: userPrompt,
+                            images: images,
+                            continuation: continuation
+                        )
+                    }
+                } catch is CancellationError {
+                    continuation.finish()
+                } catch AIProxyError.unsuccessfulRequest(let statusCode, let responseBody) {
+                    logger.error("Received non-200 status code: \(statusCode) with response body: \(responseBody)")
+                    continuation.finish(throwing: NSError(
+                        domain: "OpenAIAPI",
+                        code: statusCode,
+                        userInfo: [NSLocalizedDescriptionKey: "API error: \(responseBody)"]
+                    ))
+                } catch {
+                    logger.error("Could not create OpenAI chat completion: \(error.localizedDescription)")
+                    continuation.finish(throwing: error)
+                }
+            }
+
+            continuation.onTermination = { _ in
+                self.currentTask?.cancel()
+            }
+        }
+    }
     
     // MARK: - API Key Processing
+
+    private func streamWithAPIKey(
+        systemPrompt: String?,
+        userPrompt: String,
+        images: [Data],
+        continuation: AsyncThrowingStream<String, Error>.Continuation
+    ) async throws {
+        guard !config.apiKey.isEmpty else {
+            throw NSError(domain: "OpenAIAPI", code: -1, userInfo: [NSLocalizedDescriptionKey: "API key is missing."])
+        }
+
+        if !config.baseURL.isEmpty && config.baseURL != OpenAIConfig.defaultBaseURL {
+            let response = try await performCustomOpenAIRequest(
+                systemPrompt: systemPrompt,
+                userPrompt: userPrompt,
+                images: images,
+                streaming: false
+            )
+            if !Task.isCancelled {
+                continuation.yield(response)
+            }
+            continuation.finish()
+            return
+        }
+
+        if aiProxyService == nil {
+            setupAIProxyService()
+        }
+
+        guard let openAIService = aiProxyService else {
+            throw NSError(domain: "OpenAIAPI", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to initialize AIProxy service."])
+        }
+
+        var messages: [OpenAIChatCompletionRequestBody.Message] = []
+
+        if let systemPrompt = systemPrompt {
+            messages.append(.system(content: .text(systemPrompt)))
+        }
+
+        if images.isEmpty {
+            messages.append(.user(content: .text(userPrompt)))
+        } else {
+            var parts: [OpenAIChatCompletionRequestBody.Message.ContentPart] = [.text(userPrompt)]
+
+            for imageData in images {
+                let dataString = "data:image/jpeg;base64," + imageData.base64EncodedString()
+                if let dataURL = URL(string: dataString) {
+                    parts.append(.imageURL(dataURL, detail: .auto))
+                }
+            }
+
+            messages.append(.user(content: .parts(parts)))
+        }
+
+        let stream = try await openAIService.streamingChatCompletionRequest(
+            body: .init(model: config.model, messages: messages),
+            secondsToWait: 60
+        )
+
+        for try await chunk in stream {
+            if Task.isCancelled {
+                continuation.finish()
+                return
+            }
+
+            if let content = chunk.choices.first?.delta.content {
+                continuation.yield(content)
+            }
+        }
+
+        continuation.finish()
+    }
+
+    private func streamWithOAuth(
+        systemPrompt: String?,
+        userPrompt: String,
+        images: [Data],
+        continuation: AsyncThrowingStream<String, Error>.Continuation
+    ) async throws {
+        let accessToken = try await ensureValidOAuthToken()
+
+        let url = URL(string: CodexConstants.responsesEndpoint)!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        var input: [[String: Any]] = []
+
+        if images.isEmpty {
+            input.append([
+                "role": "user",
+                "content": [[
+                    "type": "input_text",
+                    "text": userPrompt,
+                ]],
+            ])
+        } else {
+            var contentParts: [[String: Any]] = [
+                ["type": "input_text", "text": userPrompt]
+            ]
+
+            for imageData in images {
+                let base64 = imageData.base64EncodedString()
+                contentParts.append([
+                    "type": "input_image",
+                    "image_url": "data:image/jpeg;base64,\(base64)",
+                    "detail": "auto",
+                ])
+            }
+
+            input.append([
+                "role": "user",
+                "content": contentParts,
+            ])
+        }
+
+        var body: [String: Any] = [
+            "model": config.model,
+            "input": input,
+            "stream": true,
+            "store": false,
+        ]
+
+        if let instructions = systemPrompt, !instructions.isEmpty {
+            body["instructions"] = instructions
+        }
+
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw NSError(domain: "OpenAIAPI", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid response type."])
+        }
+
+        guard (200...299).contains(httpResponse.statusCode) else {
+            var errorBody = ""
+            for try await line in bytes.lines {
+                errorBody += line
+            }
+            logger.error("OAuth Codex Request Failed: \(httpResponse.statusCode) - \(errorBody)")
+            throw NSError(
+                domain: "OpenAIAPI",
+                code: httpResponse.statusCode,
+                userInfo: [NSLocalizedDescriptionKey: "API Error: \(errorBody)"]
+            )
+        }
+
+        var receivedDelta = false
+
+        for try await line in bytes.lines {
+            if Task.isCancelled {
+                continuation.finish()
+                return
+            }
+
+            guard !line.isEmpty, line.hasPrefix("data: ") else { continue }
+
+            let jsonString = String(line.dropFirst(6))
+            if jsonString == "[DONE]" {
+                break
+            }
+
+            guard let jsonData = jsonString.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                  let eventType = json["type"] as? String else {
+                continue
+            }
+
+            if eventType == "response.output_text.delta" {
+                if let delta = json["delta"] as? String {
+                    receivedDelta = true
+                    continuation.yield(delta)
+                }
+                continue
+            }
+
+            if eventType == "response.completed" || eventType == "response.incomplete" {
+                if !receivedDelta,
+                   let responseObject = json["response"] as? [String: Any],
+                   let outputText = responseObject["output_text"] as? String,
+                   !outputText.isEmpty {
+                    continuation.yield(outputText)
+                }
+                break
+            }
+
+            if eventType == "error",
+               let message = json["message"] as? String {
+                throw NSError(
+                    domain: "OpenAIAPI",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "Codex error: \(message)"]
+                )
+            }
+        }
+
+        continuation.finish()
+    }
     
     private func processTextWithApiKey(systemPrompt: String?, userPrompt: String, images: [Data], streaming: Bool) async throws -> String {
         guard !config.apiKey.isEmpty else {
@@ -626,8 +883,8 @@ final class OpenAIProvider: AIProvider {
 
     
     func cancel() {
+        currentTask?.cancel()
         isProcessing = false
         currentTask = nil
     }
 }
-

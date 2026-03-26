@@ -9,42 +9,43 @@ extension String {
     /// Converts \[...\] to $$...$$ and \(...\) to $...$
     fileprivate func normalizedLatex() -> String {
         var result = self
-        
+
         // Convert \[...\] to $$...$$
         result = result.replacingOccurrences(of: #"\\\["#, with: "\n$$", options: .regularExpression)
         result = result.replacingOccurrences(of: #"\\\]"#, with: "$$\n", options: .regularExpression)
-        
+
         // Convert \(...\) to $...$
         result = result.replacingOccurrences(of: #"\\\("#, with: "$", options: .regularExpression)
         result = result.replacingOccurrences(of: #"\\\)"#, with: "$", options: .regularExpression)
-        
+
         return result
     }
-    
+
     /// Strips outer code block wrapper if the entire response is wrapped in one.
     /// Some AI models wrap their entire response in ```markdown or ``` fences.
     fileprivate func strippingOuterCodeBlock() -> String {
         let trimmed = self.trimmingCharacters(in: .whitespacesAndNewlines)
-        
+
         // Pattern to match content wrapped in a single outer code block
         // Matches: ```<optional language>\n<content>\n```
-        // The (?s) flag makes . match newlines
         let pattern = #"^```(?:\w+)?\s*\n([\s\S]*?)\n```$"#
-        
+
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []),
-              let match = regex.firstMatch(in: trimmed, options: [], range: NSRange(trimmed.startIndex..., in: trimmed)),
+              let match = regex.firstMatch(
+                in: trimmed,
+                options: [],
+                range: NSRange(trimmed.startIndex..., in: trimmed)
+              ),
               let contentRange = Range(match.range(at: 1), in: trimmed) else {
             return self
         }
-        
-        // Only strip if this is truly a single outer wrapper (no other content outside)
-        let content = String(trimmed[contentRange])
-        return content
+
+        return String(trimmed[contentRange])
     }
-    
-    /// Applies all markdown normalizations for AI responses
+
+    /// Applies all markdown normalizations for AI responses.
     fileprivate func normalizedForMarkdown() -> String {
-        return self
+        self
             .strippingOuterCodeBlock()
             .normalizedLatex()
     }
@@ -52,17 +53,31 @@ extension String {
 
 // MARK: - Chat Message Model
 
+enum ChatMessageStatus: Equatable, Sendable {
+    case pending
+    case complete
+    case error
+}
+
 struct ChatMessage: Identifiable, Equatable, Sendable {
-    let id = UUID()
-    let role: String // "user" or "assistant"
-    let content: String
-    let timestamp: Date = Date()
-    
-    static func == (lhs: ChatMessage, rhs: ChatMessage) -> Bool {
-        lhs.id == rhs.id &&
-        lhs.role == rhs.role &&
-        lhs.content == rhs.content &&
-        lhs.timestamp == rhs.timestamp
+    let id: UUID
+    let role: String
+    var content: String
+    let timestamp: Date
+    var status: ChatMessageStatus
+
+    init(
+        id: UUID = UUID(),
+        role: String,
+        content: String,
+        timestamp: Date = Date(),
+        status: ChatMessageStatus = .complete
+    ) {
+        self.id = id
+        self.role = role
+        self.content = content
+        self.timestamp = timestamp
+        self.status = status
     }
 }
 
@@ -71,38 +86,43 @@ struct ChatMessage: Identifiable, Equatable, Sendable {
 struct ResponseView: View {
     @State private var viewModel: ResponseViewModel
     @Bindable private var settings = AppSettings.shared
-    @Environment(\.colorScheme) var colorScheme
     @State private var inputText: String = ""
-    @State private var isRegenerating: Bool = false
-    @State private var scrollProxy: ScrollViewProxy?
-    @State private var latestMessageId: UUID?
-    @State private var showSettings = false
-    @State private var errorMessage: String?
-    @State private var showError: Bool = false
-    
-    init(content: String, selectedText: String, option: WritingOption? = nil, provider: any AIProvider) {
+
+    init(viewModel: ResponseViewModel) {
+        self._viewModel = State(initialValue: viewModel)
+    }
+
+    init(
+        content: String,
+        selectedText: String,
+        option: WritingOption? = nil,
+        provider: any AIProvider,
+        conversationImages: [Data] = []
+    ) {
         self._viewModel = State(initialValue: ResponseViewModel(
             content: content,
             selectedText: selectedText,
             option: option,
-            provider: provider
+            provider: provider,
+            conversationImages: conversationImages
         ))
     }
-    
+
     var body: some View {
         VStack(spacing: 0) {
-            // Toolbar
             HStack(spacing: 16) {
                 Button(action: { viewModel.copyContent() }) {
-                    Label(viewModel.showCopyConfirmation ? "Copied!" : "Copy All",
-                          systemImage: viewModel.showCopyConfirmation ? "checkmark" : "doc.on.doc")
+                    Label(
+                        viewModel.showCopyConfirmation ? "Copied!" : "Copy All",
+                        systemImage: viewModel.showCopyConfirmation ? "checkmark" : "doc.on.doc"
+                    )
                     .frame(minWidth: 80)
                 }
                 .buttonStyle(.borderedProminent)
                 .animation(.easeInOut, value: viewModel.showCopyConfirmation)
-                
+
                 Spacer()
-                
+
                 HStack(spacing: 12) {
                     Button(action: { viewModel.fontSize -= 1 }) {
                         Label("Decrease text size", systemImage: "textformat.size.smaller")
@@ -111,7 +131,7 @@ struct ResponseView: View {
                     .buttonStyle(.borderless)
                     .disabled(viewModel.fontSize <= 10)
                     .keyboardShortcut("-", modifiers: .command)
-                    
+
                     Button(action: { viewModel.fontSize += 1 }) {
                         Label("Increase text size", systemImage: "textformat.size.larger")
                             .labelStyle(.iconOnly)
@@ -119,7 +139,7 @@ struct ResponseView: View {
                     .buttonStyle(.borderless)
                     .disabled(viewModel.fontSize >= 20)
                     .keyboardShortcut("+", modifiers: .command)
-                    
+
                     Button(action: {
                         viewModel.fontSize = 14
                     }) {
@@ -132,95 +152,57 @@ struct ResponseView: View {
             }
             .padding()
             .background(Color.clear)
-            
-            // Chat messages area
+
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 16) {
                         ForEach(viewModel.messages) { message in
                             ChatMessageView(message: message, fontSize: viewModel.fontSize)
                                 .id(message.id)
-                                .frame(maxWidth: .infinity, alignment: message.role == "user" ? .trailing : .leading)
-                        }
-                        
-                        // Show loading indicator
-                        if viewModel.isProcessing {
-                            HStack(alignment: .top, spacing: 12) {
-                                HStack(spacing: 8) {
-                                    ProgressView()
-                                        .scaleEffect(0.8)
-                                    Text("Thinking...")
-                                        .font(.system(size: 14))
-                                        .foregroundStyle(.secondary)
-                                }
-                                .padding(12)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                        .fill(Color(.controlBackgroundColor))
+                                .frame(
+                                    maxWidth: .infinity,
+                                    alignment: message.role == "user" ? .trailing : .leading
                                 )
-                                Spacer(minLength: 15)
-                            }
-                            .padding(.top, 4)
                         }
                     }
                     .padding()
                 }
-                .onChange(of: viewModel.messages, initial: true) { oldValue, newValue in
-                    if let lastId = newValue.last?.id {
+                .onChange(of: viewModel.messages, initial: true) { _, newValue in
+                    if let lastID = newValue.last?.id {
                         withAnimation {
-                            proxy.scrollTo(lastId, anchor: .bottom)
+                            proxy.scrollTo(lastID, anchor: .bottom)
                         }
                     }
                 }
             }
-            
-            // Input area
+
             VStack(spacing: 8) {
                 Divider()
-                
+
                 HStack(spacing: 8) {
                     TextField("Ask a follow-up question...", text: $inputText)
                         .textFieldStyle(.plain)
                         .appleStyleTextField(
                             text: inputText,
-                            isLoading: isRegenerating,
+                            isLoading: viewModel.isRequestInFlight,
                             onSubmit: sendMessage
                         )
-                        .disabled(viewModel.isProcessing)
+                        .disabled(!viewModel.canSendFollowUps)
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 8)
+                .opacity(viewModel.canSendFollowUps ? 1 : 0.7)
             }
             .background(Color(.windowBackgroundColor))
         }
         .windowBackground(useGradient: settings.useGradientTheme)
-        .alert("Error", isPresented: $showError, presenting: errorMessage) { _ in
-            Button("OK") { errorMessage = nil }
-        } message: { message in
-            Text(message)
-        }
     }
-    
+
     private func sendMessage() {
-        guard !inputText.isEmpty, !viewModel.isProcessing else { return }
+        guard viewModel.canSendFollowUps, !inputText.isEmpty else { return }
         let question = inputText
         inputText = ""
-        isRegenerating = true
-        
-        Task {
-            do {
-                try await viewModel.processFollowUpQuestion(question)
-                await MainActor.run {
-                    isRegenerating = false
-                }
-            } catch {
-                await MainActor.run {
-                    errorMessage = error.localizedDescription
-                    showError = true
-                    isRegenerating = false
-                }
-            }
-        }
+        viewModel.processFollowUpQuestion(question)
     }
 }
 
@@ -229,9 +211,9 @@ struct ResponseView: View {
 struct ChatMessageView: View {
     let message: ChatMessage
     let fontSize: CGFloat
-    @State private var isHovering: Bool = false
-    @State private var showCopiedFeedback: Bool = false
-    
+    @State private var isHovering = false
+    @State private var showCopiedFeedback = false
+
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             if message.role == "assistant" {
@@ -248,15 +230,18 @@ struct ChatMessageView: View {
             isHovering = hovering
         }
     }
-    
+
     @ViewBuilder
     private func bubbleView(role: String) -> some View {
         VStack(alignment: role == "assistant" ? .leading : .trailing, spacing: 2) {
-            RichMarkdownView(text: message.content, fontSize: fontSize)
+            messageBody
+                .padding()
+                .background(backgroundFill)
+                .overlay(backgroundStroke)
+                .clipShape(ChatBubble(isFromUser: message.role == "user"))
                 .textSelection(.enabled)
-                .chatBubbleStyle(isFromUser: message.role == "user")
                 .accessibilityLabel(message.role == "user" ? "Your message" : "Assistant's response")
-                .accessibilityValue(message.content)
+                .accessibilityValue(displayContent)
                 .contextMenu {
                     Button("Copy Selection") {
                         NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil)
@@ -265,13 +250,12 @@ struct ChatMessageView: View {
                         copyEntireMessage()
                     }
                 }
-            
-            // Timestamp and copy button
+
             HStack(spacing: 8) {
                 Text(message.timestamp.formatted(.dateTime.hour().minute()))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                
+
                 Button(action: copyEntireMessage) {
                     if showCopiedFeedback {
                         Text("Copied")
@@ -290,12 +274,61 @@ struct ChatMessageView: View {
         }
         .frame(maxWidth: 500, alignment: role == "assistant" ? .leading : .trailing)
     }
-    
+
+    @ViewBuilder
+    private var messageBody: some View {
+        if message.role == "assistant" && message.status == .pending {
+            HStack(alignment: .top, spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+
+                Text(displayContent)
+                    .font(.system(size: fontSize))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } else if message.status == .error {
+            Text(displayContent)
+                .font(.system(size: fontSize))
+                .foregroundStyle(.red)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            RichMarkdownView(text: displayContent, fontSize: fontSize)
+        }
+    }
+
+    private var displayContent: String {
+        if message.status == .pending && message.content.isEmpty {
+            return "Thinking..."
+        }
+
+        return message.content
+    }
+
+    private var backgroundFill: some View {
+        ChatBubble(isFromUser: message.role == "user")
+            .fill(
+                message.role == "user"
+                    ? Color.blue.opacity(0.15)
+                    : (message.status == .error
+                        ? Color.red.opacity(0.12)
+                        : Color(.controlBackgroundColor))
+            )
+    }
+
+    private var backgroundStroke: some View {
+        ChatBubble(isFromUser: message.role == "user")
+            .stroke(
+                message.status == .error ? Color.red.opacity(0.35) : Color.clear,
+                lineWidth: 1
+            )
+    }
+
     private func copyEntireMessage() {
         let pasteboard = NSPasteboard.general
         pasteboard.prepareForNewContents(with: [])
-        pasteboard.writeObjects([message.content as NSString])
-        
+        pasteboard.writeObjects([displayContent as NSString])
+
         showCopiedFeedback = true
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(2))
@@ -309,147 +342,420 @@ struct ChatMessageView: View {
 @MainActor
 @Observable
 final class ResponseViewModel {
-    
-    // UserDefaults key for persistent font size storage
     private static let fontSizeKey = "ResponseView.fontSize"
     private static let defaultFontSize: CGFloat = 14
-    
-    var messages: [ChatMessage] = []
-    var fontSize: CGFloat = 14 {
-            didSet {
-                // Save font size to UserDefaults whenever it changes
-                UserDefaults.standard.set(fontSize, forKey: Self.fontSizeKey)
-            }
+
+    var messages: [ChatMessage]
+    var fontSize: CGFloat {
+        didSet {
+            UserDefaults.standard.set(fontSize, forKey: Self.fontSizeKey)
+        }
     }
     var showCopyConfirmation = false
-    var isProcessing = false
-    
-    private let content: String
-    private let selectedText: String
-    private let option: WritingOption?
+    private(set) var isInitialResponsePending = false
+    private(set) var isFollowUpPending = false
+
+    let selectedText: String
+    let option: WritingOption?
+    let conversationImages: [Data]
+
     private let provider: any AIProvider
-    
-    // Store conversation history for context
-    private var conversationHistory: [(role: String, content: String)] = []
-    
-    init(content: String, selectedText: String, option: WritingOption?, provider: any AIProvider) {
-        // 🔧 Normalize markdown content (strip outer code blocks + normalize LaTeX)
-        self.content = content.normalizedForMarkdown()
+    private var baseSystemPrompt: String?
+    private var conversationHistory: [(role: String, content: String)]
+    private var initialAssistantMessageID: UUID?
+    private var activeRequestID: UUID?
+    private var activeRequestTask: Task<Void, Never>?
+    private var onInitialRequestFinished: (() -> Void)?
+    private var isClosed = false
+
+    var isRequestInFlight: Bool {
+        activeRequestID != nil
+    }
+
+    var canSendFollowUps: Bool {
+        !isRequestInFlight && !isClosed
+    }
+
+    init(
+        initialMessages: [ChatMessage] = [],
+        selectedText: String,
+        option: WritingOption? = nil,
+        provider: any AIProvider,
+        conversationImages: [Data] = [],
+        baseSystemPrompt: String? = nil
+    ) {
+        self.messages = initialMessages
         self.selectedText = selectedText
         self.option = option
         self.provider = provider
-        
-        // Load saved font size from UserDefaults, or use default
+        self.conversationImages = conversationImages
+        self.baseSystemPrompt = baseSystemPrompt
+        self.conversationHistory = initialMessages
+            .filter { $0.status == .complete }
+            .map { ($0.role, $0.content) }
+
         let savedFontSize = UserDefaults.standard.object(forKey: Self.fontSizeKey) as? CGFloat
         self.fontSize = savedFontSize ?? Self.defaultFontSize
-        
-        // Add initial assistant message
-        messages.append(ChatMessage(role: "assistant", content: self.content))
-        
-        // Initialize conversation history
-        if !selectedText.isEmpty {
-            conversationHistory.append((role: "user", content: selectedText))
-        }
-        conversationHistory.append((role: "assistant", content: self.content))
     }
-    
-    func processFollowUpQuestion(_ question: String) async throws {
-        // Add user message to UI
-        messages.append(ChatMessage(role: "user", content: question))
-        
-        // Add to conversation history
-        conversationHistory.append((role: "user", content: question))
-        
-        isProcessing = true
-        
-        do {
-            // Build context-aware system prompt
-            let systemPrompt = buildSystemPrompt()
-            
-            // Build user prompt with conversation context
-            let userPrompt = buildUserPrompt(question: question)
-            
-            // Call the actual AI provider
-            let rawResponse = try await provider.processText(
+
+    convenience init(
+        content: String,
+        selectedText: String,
+        option: WritingOption? = nil,
+        provider: any AIProvider,
+        conversationImages: [Data] = [],
+        baseSystemPrompt: String? = nil
+    ) {
+        let normalizedContent = content.isEmpty ? "" : content.normalizedForMarkdown()
+        let initialMessages = normalizedContent.isEmpty
+            ? []
+            : [ChatMessage(role: "assistant", content: normalizedContent)]
+
+        self.init(
+            initialMessages: initialMessages,
+            selectedText: selectedText,
+            option: option,
+            provider: provider,
+            conversationImages: conversationImages,
+            baseSystemPrompt: baseSystemPrompt
+        )
+    }
+
+    func startInitialResponse(
+        systemPrompt: String?,
+        userPrompt: String,
+        images: [Data],
+        onFinish: (() -> Void)? = nil
+    ) {
+        guard !isClosed else {
+            onFinish?()
+            return
+        }
+
+        cancelInFlightWork()
+
+        baseSystemPrompt = systemPrompt
+        onInitialRequestFinished = onFinish
+        isInitialResponsePending = true
+
+        beginAssistantPlaceholder()
+
+        let requestID = UUID()
+        activeRequestID = requestID
+        activeRequestTask = Task { [weak self] in
+            await self?.consumeInitialResponse(
+                requestID: requestID,
                 systemPrompt: systemPrompt,
                 userPrompt: userPrompt,
-                images: [], // Follow-up questions don't include images
-                streaming: false
+                images: images
             )
-            
-            // 🔧 Normalize markdown content (strip outer code blocks + normalize LaTeX)
-            let normalizedResponse = rawResponse.normalizedForMarkdown()
-            
-            // Add to UI
-            messages.append(ChatMessage(role: "assistant", content: normalizedResponse))
-            
-            // Add to conversation history
-            conversationHistory.append((role: "assistant", content: normalizedResponse))
-            
-            isProcessing = false
-        } catch {
-            isProcessing = false
-            throw error
         }
     }
-    
-    private func buildSystemPrompt() -> String {
-        // Use the original option's system prompt if available, otherwise use a general one
-        if let option = option {
-            return """
-            You are a helpful AI assistant continuing a conversation about text modification.
-            
-            Original task: \(option.systemPrompt)
-            
-            The user may ask follow-up questions or request modifications. Provide helpful, 
-            contextual responses based on the conversation history. Use Markdown formatting 
-            where appropriate.
-            """
-        } else {
-            return """
-            You are a helpful AI assistant. Answer the user's questions thoughtfully and 
-            comprehensively. Maintain context from the conversation history. Use Markdown 
-            formatting where appropriate.
-            """
+
+    func beginAssistantPlaceholder() {
+        initialAssistantMessageID = appendAssistantPlaceholder()
+    }
+
+    func completeAssistantMessage(_ content: String) {
+        guard let messageID = initialAssistantMessageID else {
+            messages.append(ChatMessage(role: "assistant", content: normalizeAssistantContent(content)))
+            return
+        }
+
+        completeAssistantMessage(content, id: messageID)
+        initialAssistantMessageID = nil
+    }
+
+    func failInitialRequest(_ message: String) {
+        guard let messageID = initialAssistantMessageID else {
+            messages.append(ChatMessage(role: "assistant", content: message, status: .error))
+            return
+        }
+
+        completeAssistantMessage(message, id: messageID, status: .error)
+        initialAssistantMessageID = nil
+    }
+
+    func appendAssistantDelta(_ delta: String) {
+        guard let messageID = initialAssistantMessageID else { return }
+        appendAssistantDelta(delta, id: messageID)
+    }
+
+    func processFollowUpQuestion(_ question: String) {
+        guard canSendFollowUps, !question.isEmpty else { return }
+
+        cancelInFlightWork()
+
+        messages.append(ChatMessage(role: "user", content: question))
+        isFollowUpPending = true
+
+        let placeholderID = appendAssistantPlaceholder()
+        let requestID = UUID()
+        activeRequestID = requestID
+        activeRequestTask = Task { [weak self] in
+            await self?.consumeFollowUpResponse(
+                requestID: requestID,
+                question: question,
+                placeholderID: placeholderID
+            )
         }
     }
-    
-    private func buildUserPrompt(question: String) -> String {
-        // Include recent conversation history for context (last 5 exchanges)
-        let recentHistory = conversationHistory.suffix(10) // Last 5 exchanges (user + assistant)
-        
-        var prompt = ""
-        
-        // Add conversation history
-        if recentHistory.count > 2 { // More than just the initial exchange
-            prompt += "Conversation history:\n\n"
-            for (_, exchange) in recentHistory.dropLast(1).enumerated() {
-                let role = exchange.role == "user" ? "User" : "Assistant"
-                prompt += "\(role): \(exchange.content)\n\n"
-            }
-            prompt += "---\n\n"
-        }
-        
-        // Add current question
-        prompt += "User's follow-up question: \(question)"
-        
-        return prompt
-    }
-    
+
     func copyContent() {
-        let conversationText = messages.map { message in
-            return "\(message.role.capitalized): \(message.content)"
-        }.joined(separator: "\n\n")
-        
+        let conversationText = messages.compactMap { message -> String? in
+            if message.status == .pending && message.content.isEmpty {
+                return nil
+            }
+
+            return "\(message.role.capitalized): \(displayContent(for: message))"
+        }
+        .joined(separator: "\n\n")
+
+        guard !conversationText.isEmpty else { return }
+
         let pasteboard = NSPasteboard.general
         pasteboard.prepareForNewContents(with: [])
         pasteboard.writeObjects([conversationText as NSString])
-        
+
         showCopyConfirmation = true
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(2))
             self.showCopyConfirmation = false
         }
+    }
+
+    func markClosed() {
+        guard !isClosed else { return }
+        isClosed = true
+        cancelInFlightWork()
+    }
+
+    private func consumeInitialResponse(
+        requestID: UUID,
+        systemPrompt: String?,
+        userPrompt: String,
+        images: [Data]
+    ) async {
+        do {
+            var response = ""
+
+            for try await delta in provider.processTextStream(
+                systemPrompt: systemPrompt,
+                userPrompt: userPrompt,
+                images: images
+            ) {
+                guard shouldApplyUpdates(for: requestID) else { return }
+                response += delta
+                appendAssistantDelta(delta)
+            }
+
+            guard shouldApplyUpdates(for: requestID) else { return }
+
+            completeAssistantMessage(response)
+            let normalizedResponse = normalizeAssistantContent(response)
+            if !normalizedResponse.isEmpty {
+                conversationHistory.append((role: "assistant", content: normalizedResponse))
+            }
+            finishActiveRequest(initialRequest: true)
+        } catch is CancellationError {
+            guard activeRequestID == requestID || isClosed else { return }
+            finishActiveRequest(initialRequest: true)
+        } catch {
+            guard shouldApplyUpdates(for: requestID) else { return }
+            failInitialRequest(Self.errorMessage(for: error))
+            finishActiveRequest(initialRequest: true)
+        }
+    }
+
+    private func consumeFollowUpResponse(
+        requestID: UUID,
+        question: String,
+        placeholderID: UUID
+    ) async {
+        do {
+            var response = ""
+
+            for try await delta in provider.processTextStream(
+                systemPrompt: buildFollowUpSystemPrompt(),
+                userPrompt: buildContextualPrompt(for: question),
+                images: conversationImages
+            ) {
+                guard shouldApplyUpdates(for: requestID) else { return }
+                response += delta
+                appendAssistantDelta(delta, id: placeholderID)
+            }
+
+            guard shouldApplyUpdates(for: requestID) else { return }
+
+            completeAssistantMessage(response, id: placeholderID)
+            conversationHistory.append((role: "user", content: question))
+
+            let normalizedResponse = normalizeAssistantContent(response)
+            if !normalizedResponse.isEmpty {
+                conversationHistory.append((role: "assistant", content: normalizedResponse))
+            }
+            finishActiveRequest(initialRequest: false)
+        } catch is CancellationError {
+            guard activeRequestID == requestID || isClosed else { return }
+            finishActiveRequest(initialRequest: false)
+        } catch {
+            guard shouldApplyUpdates(for: requestID) else { return }
+            completeAssistantMessage(
+                Self.errorMessage(for: error),
+                id: placeholderID,
+                status: .error
+            )
+            finishActiveRequest(initialRequest: false)
+        }
+    }
+
+    private func buildFollowUpSystemPrompt() -> String {
+        if let baseSystemPrompt,
+           !baseSystemPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return """
+            You are continuing a conversation about a prior AI response.
+
+            Original instruction:
+            \(baseSystemPrompt)
+
+            The user may ask follow-up questions or request revisions. Respond helpfully while maintaining the existing context. Use Markdown formatting where appropriate.
+            """
+        }
+
+        if let option {
+            return """
+            You are a helpful AI assistant continuing a conversation about text modification.
+
+            Original task: \(option.systemPrompt)
+
+            The user may ask follow-up questions or request revisions. Respond helpfully while maintaining the existing context. Use Markdown formatting where appropriate.
+            """
+        }
+
+        return """
+        You are a helpful AI assistant. Answer the user's questions thoughtfully and comprehensively while maintaining context from the previous conversation. Use Markdown formatting where appropriate.
+        """
+    }
+
+    private func buildContextualPrompt(for question: String) -> String {
+        let recentHistory = conversationHistory.suffix(10)
+        let historyText = recentHistory
+            .map { entry in
+                "\(entry.role == "user" ? "User" : "Assistant"): \(entry.content)"
+            }
+            .joined(separator: "\n\n")
+
+        let originalContext: String
+        if selectedText.isEmpty {
+            originalContext = ""
+        } else {
+            originalContext = """
+            Original selected text:
+            \(selectedText)
+
+            """
+        }
+
+        return """
+        \(originalContext)Previous conversation:
+        \(historyText.isEmpty ? "No previous conversation." : historyText)
+
+        User's follow-up question: \(question)
+
+        Respond to the user's question while maintaining context from the previous conversation.
+        """
+    }
+
+    private func appendAssistantPlaceholder() -> UUID {
+        let placeholder = ChatMessage(role: "assistant", content: "", status: .pending)
+        messages.append(placeholder)
+        return placeholder.id
+    }
+
+    private func completeAssistantMessage(
+        _ content: String,
+        id: UUID,
+        status: ChatMessageStatus = .complete
+    ) {
+        updateMessage(id: id) { message in
+            message.content = status == .complete
+                ? normalizeAssistantContent(content)
+                : content
+            message.status = status
+        }
+    }
+
+    private func appendAssistantDelta(_ delta: String, id: UUID) {
+        updateMessage(id: id) { message in
+            message.content += delta
+            message.status = .pending
+        }
+    }
+
+    private func updateMessage(id: UUID, update: (inout ChatMessage) -> Void) {
+        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
+
+        var message = messages[index]
+        update(&message)
+        messages[index] = message
+    }
+
+    private func cancelInFlightWork() {
+        activeRequestID = nil
+        activeRequestTask?.cancel()
+        activeRequestTask = nil
+        provider.cancel()
+
+        if isInitialResponsePending {
+            let callback = onInitialRequestFinished
+            onInitialRequestFinished = nil
+            isInitialResponsePending = false
+            callback?()
+        }
+
+        isFollowUpPending = false
+        initialAssistantMessageID = nil
+    }
+
+    private func finishActiveRequest(initialRequest: Bool) {
+        activeRequestID = nil
+        activeRequestTask = nil
+        isFollowUpPending = false
+
+        if initialRequest {
+            isInitialResponsePending = false
+            let callback = onInitialRequestFinished
+            onInitialRequestFinished = nil
+            callback?()
+        }
+    }
+
+    private func shouldApplyUpdates(for requestID: UUID) -> Bool {
+        activeRequestID == requestID && !isClosed
+    }
+
+    private func displayContent(for message: ChatMessage) -> String {
+        if message.status == .pending && message.content.isEmpty {
+            return "Thinking..."
+        }
+
+        return message.content
+    }
+
+    private func normalizeAssistantContent(_ content: String) -> String {
+        guard !content.isEmpty else { return content }
+        return content.normalizedForMarkdown()
+    }
+
+    private static func errorMessage(for error: Error) -> String {
+        let message = (error as NSError).localizedDescription
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if message.isEmpty {
+            return "Failed to get a response."
+        }
+
+        return "Failed to get a response.\n\n\(message)"
     }
 }
 
@@ -462,26 +768,19 @@ struct RichMarkdownView: View {
     var body: some View {
         MarkdownView(text)
             .markdownMathRenderingEnabled()
-            // Body text (paragraphs, list items, etc.)
             .font(.system(size: fontSize), for: .body)
-            // Headings - scaled relative to base font size
             .font(.system(size: fontSize * 1.4, weight: .bold), for: .h1)
             .font(.system(size: fontSize * 1.25, weight: .bold), for: .h2)
             .font(.system(size: fontSize * 1.15, weight: .semibold), for: .h3)
             .font(.system(size: fontSize * 1.1, weight: .semibold), for: .h4)
             .font(.system(size: fontSize * 1.05, weight: .medium), for: .h5)
             .font(.system(size: fontSize, weight: .medium), for: .h6)
-            // Code blocks
             .font(.system(size: fontSize, design: .monospaced), for: .codeBlock)
-            // Block quotes
             .font(.system(size: fontSize), for: .blockQuote)
-            // Tables
             .font(.system(size: fontSize, weight: .semibold), for: .tableHeader)
             .font(.system(size: fontSize), for: .tableBody)
-            // Math
             .font(.system(size: fontSize), for: .inlineMath)
             .font(.system(size: fontSize + 2), for: .displayMath)
-            // Tint for inline code
             .tint(.primary, for: .inlineCodeBlock)
     }
 }

@@ -7278,6 +7278,7 @@
       }
     },
     "Thinking..." : {
+      "extractionState" : "stale",
       "localizations" : {
         "de" : {
           "stringUnit" : {

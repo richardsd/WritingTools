@@ -126,6 +126,104 @@ final class MistralProvider: AIProvider {
             throw error
         }
     }
+
+    func processTextStream(
+        systemPrompt: String?,
+        userPrompt: String,
+        images: [Data]
+    ) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            isProcessing = true
+
+            currentTask = Task { [weak self] in
+                guard let self else {
+                    continuation.finish()
+                    return
+                }
+
+                defer {
+                    self.isProcessing = false
+                    self.currentTask = nil
+                }
+
+                do {
+                    guard !self.config.apiKey.isEmpty else {
+                        throw NSError(
+                            domain: "MistralAPI",
+                            code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "API key is missing."]
+                        )
+                    }
+
+                    if self.aiProxyService == nil {
+                        self.setupAIProxyService()
+                    }
+
+                    guard let mistralService = self.aiProxyService else {
+                        throw NSError(
+                            domain: "MistralAPI",
+                            code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "Failed to initialize AIProxy service."]
+                        )
+                    }
+
+                    var messages: [MistralChatCompletionRequestBody.Message] = []
+
+                    if let systemPrompt = systemPrompt {
+                        messages.append(.system(content: systemPrompt))
+                    }
+
+                    var combinedPrompt = userPrompt
+                    if !images.isEmpty {
+                        let ocrText = await OCRManager.shared.extractText(from: images)
+                        if !ocrText.isEmpty {
+                            combinedPrompt += "\nExtracted Text: \(ocrText)"
+                        }
+                    }
+
+                    messages.append(.user(content: combinedPrompt))
+
+                    let stream = try await mistralService.streamingChatCompletionRequest(
+                        body: .init(messages: messages, model: self.config.model),
+                        secondsToWait: 60
+                    )
+
+                    for try await chunk in stream {
+                        if Task.isCancelled {
+                            continuation.finish()
+                            return
+                        }
+
+                        if let content = chunk.choices.first?.delta.content {
+                            continuation.yield(content)
+                        }
+
+                        if let usage = chunk.usage {
+                            logger.debug("Usage: prompt \(usage.promptTokens ?? 0), completion \(usage.completionTokens ?? 0), total \(usage.totalTokens ?? 0)")
+                        }
+                    }
+
+                    continuation.finish()
+                } catch is CancellationError {
+                    continuation.finish()
+                } catch AIProxyError.unsuccessfulRequest(let statusCode, let responseBody) {
+                    logger.error("Received non-200 status code: \(statusCode) with response body: \(responseBody)")
+                    continuation.finish(throwing: NSError(
+                        domain: "MistralAPI",
+                        code: statusCode,
+                        userInfo: [NSLocalizedDescriptionKey: "API error: \(responseBody)"]
+                    ))
+                } catch {
+                    logger.error("Could not create mistral chat completion: \(error.localizedDescription)")
+                    continuation.finish(throwing: error)
+                }
+            }
+
+            continuation.onTermination = { _ in
+                self.currentTask?.cancel()
+            }
+        }
+    }
     
     func cancel() {
         currentTask?.cancel()
