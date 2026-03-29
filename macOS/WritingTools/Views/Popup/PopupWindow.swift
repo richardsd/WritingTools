@@ -6,14 +6,21 @@ class PopupWindow: NSWindow {
   private var retainedHostingView: NSHostingView<PopupView>?
   private var trackingArea: NSTrackingArea?
   private let appState: AppState
-  private let windowWidth: CGFloat = 305
+  private static let panelWidth: CGFloat = 305
+  private static let basePanelHeight: CGFloat = 100
+  private var hasAppliedInitialLayout = false
 
   private let viewModel = PopupViewModel()
   init(appState: AppState) {
     self.appState = appState
 
     super.init(
-      contentRect: NSRect(x: 0, y: 0, width: windowWidth, height: 100),
+      contentRect: NSRect(
+        x: 0,
+        y: 0,
+        width: Self.panelWidth + PopupChrome.totalHorizontalInset,
+        height: Self.basePanelHeight + PopupChrome.totalVerticalInset
+      ),
       styleMask: [.borderless, .fullSizeContentView],
       backing: .buffered,
       defer: true
@@ -25,11 +32,12 @@ class PopupWindow: NSWindow {
     setupTrackingArea()
 
     Task { @MainActor [weak self] in
-      self?.updateWindowSize()
+      self?.updateWindowSize(animated: false)
     }
 
     observeCommandChanges()
     observeEditModeChanges()
+    observePopupSelectionChanges()
   }
 
   private func configureWindow() {
@@ -52,14 +60,8 @@ class PopupWindow: NSWindow {
 
     let hostingView = FirstResponderHostingView(rootView: popupView)
     hostingView.wantsLayer = true
-    hostingView.layer?.cornerRadius = 20
-    hostingView.layer?.maskedCorners = [
-      .layerMinXMinYCorner,
-      .layerMaxXMinYCorner,
-      .layerMinXMaxYCorner,
-      .layerMaxXMaxYCorner,
-    ]
-    hostingView.layer?.masksToBounds = true
+    hostingView.layer?.backgroundColor = NSColor.clear.cgColor
+    hostingView.layer?.masksToBounds = false
 
     contentView = hostingView
     retainedHostingView = hostingView
@@ -68,55 +70,60 @@ class PopupWindow: NSWindow {
     makeFirstResponder(hostingView)
     makeKey()
 
-    updateWindowSize()
+    updateWindowSize(animated: false)
 
     // Register with WindowManager for lifecycle management/cleanup
     WindowManager.shared.registerPopupWindow(self)
   }
 
-  @objc private func updateWindowSize() {
-    // Use a shorter delay only when needed for layout stabilization
-    // For edit mode changes, we want immediate response
-    let delay: Duration = self.viewModel.isEditMode ? .milliseconds(50) : .milliseconds(100)
+  private func updateWindowSize(animated: Bool = true) {
+    let baseHeight = Self.basePanelHeight
+    let buttonHeight: CGFloat = 55
+    let spacing: CGFloat = 10
+    let editButtonHeight: CGFloat = 60
+    let statusHeight: CGFloat = 68
 
-    Task { @MainActor [weak self] in
-      try? await Task.sleep(for: delay)
-      guard let self else { return }
+    let totalCommands = self.appState.commandManager.commands.count
+    let hasContent =
+      !self.appState.selectedText.isEmpty
+      || !self.appState.selectedImages.isEmpty
+    let isEditMode = self.viewModel.isEditMode
 
-      let baseHeight: CGFloat = 100
-      let buttonHeight: CGFloat = 55
-      let spacing: CGFloat = 10
-      let editButtonHeight: CGFloat = 60
+    let numRows = hasContent ? ceil(Double(totalCommands) / 2.0) : 0
+    let showsStatusSection = !hasContent
+      && self.appState.popupSelectionState != .idle
+      && !isEditMode
 
-      let totalCommands = self.appState.commandManager.commands.count
-      let hasContent =
-        !self.appState.selectedText.isEmpty
-        || !self.appState.selectedImages.isEmpty
-      let isEditMode = self.viewModel.isEditMode
+    var contentHeight: CGFloat = baseHeight
 
-      let numRows = hasContent ? ceil(Double(totalCommands) / 2.0) : 0
+    if hasContent {
+      contentHeight += (buttonHeight * CGFloat(numRows)) + spacing
+    } else if showsStatusSection {
+      contentHeight += statusHeight
+    }
 
-      var contentHeight: CGFloat = baseHeight
+    if isEditMode {
+      contentHeight += editButtonHeight
+    }
 
-      if hasContent {
-        contentHeight += (buttonHeight * CGFloat(numRows)) + spacing
-        if isEditMode {
-          contentHeight += editButtonHeight
-        }
-      }
+    let windowHeight = contentHeight + PopupChrome.totalVerticalInset
+    let windowWidth = Self.panelWidth + PopupChrome.totalHorizontalInset
+    let shouldAnimate = animated && hasAppliedInitialLayout
+    hasAppliedInitialLayout = true
 
-        await NSAnimationContext.runAnimationGroup { context in
+    if shouldAnimate {
+      NSAnimationContext.runAnimationGroup { context in
         context.duration = 0.25
         context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
 
-        self.animator()
-          .setContentSize(
-            NSSize(width: self.windowWidth, height: contentHeight)
-          )
+        self.animator().setContentSize(
+          NSSize(width: windowWidth, height: windowHeight)
+        )
 
         if let screen = self.screen {
           var frame = self.frame
-          frame.size.height = contentHeight
+          frame.size.width = windowWidth
+          frame.size.height = windowHeight
 
           if frame.maxY > screen.visibleFrame.maxY {
             frame.origin.y = screen.visibleFrame.maxY - frame.height
@@ -124,6 +131,20 @@ class PopupWindow: NSWindow {
 
           self.animator().setFrame(frame, display: true)
         }
+      }
+    } else {
+      self.setContentSize(NSSize(width: windowWidth, height: windowHeight))
+
+      if let screen = self.screen {
+        var frame = self.frame
+        frame.size.width = windowWidth
+        frame.size.height = windowHeight
+
+        if frame.maxY > screen.visibleFrame.maxY {
+          frame.origin.y = screen.visibleFrame.maxY - frame.height
+        }
+
+        self.setFrame(frame, display: true)
       }
     }
   }
@@ -167,6 +188,7 @@ class PopupWindow: NSWindow {
   }
 
   override func close() {
+    appState.cancelPopupSelectionCapture()
     cleanup()
     super.close()
   }
@@ -233,6 +255,7 @@ class PopupWindow: NSWindow {
 
     let padding: CGFloat = 10
     var windowFrame = frame
+    let windowWidth = Self.panelWidth + PopupChrome.totalHorizontalInset
     windowFrame.size.width = windowWidth
 
     windowFrame.origin.x = mouseLocation.x - (windowWidth / 2)
@@ -284,6 +307,19 @@ extension PopupWindow {
       Task { @MainActor in
         self?.updateWindowSize()
         self?.observeEditModeChanges()
+      }
+    }
+  }
+
+  private func observePopupSelectionChanges() {
+    withObservationTracking { [weak self] in
+      _ = self?.appState.popupSelectionState
+      _ = self?.appState.selectedText
+      _ = self?.appState.selectedImages.count
+    } onChange: { [weak self] in
+      Task { @MainActor in
+        self?.updateWindowSize()
+        self?.observePopupSelectionChanges()
       }
     }
   }

@@ -35,6 +35,18 @@ struct PopupView: View {
     GridItem(.flexible(), spacing: 8),
   ]
 
+  private var hasCapturedContent: Bool {
+    !appState.selectedText.isEmpty || !appState.selectedImages.isEmpty
+  }
+
+  private var shouldShowSelectionSection: Bool {
+    viewModel.isEditMode || appState.popupSelectionState != .idle || hasCapturedContent
+  }
+
+  private var popupChromeShape: RoundedRectangle {
+    RoundedRectangle(cornerRadius: PopupChrome.cornerRadius, style: .continuous)
+  }
+
   var body: some View {
     VStack(spacing: 12) {
       // Top bar with buttons
@@ -96,34 +108,38 @@ struct PopupView: View {
         .padding(.horizontal, 10)
       }
 
-      if !appState.selectedText.isEmpty || !appState.selectedImages.isEmpty {
+      if shouldShowSelectionSection {
         Divider()
           .padding(.horizontal, 10)
 
-        // Command buttons grid
-        LazyVGrid(columns: columns, spacing: 8) {
-          ForEach(appState.commandManager.commands) { command in
-            CommandButton(
-              command: command,
-              isEditing: viewModel.isEditMode,
-              isLoading: processingCommandId == command.id,
-              onTap: {
-                processingCommandId = command.id
-                Task {
-                  await processCommandAndCloseWhenDone(command)
+        if hasCapturedContent {
+          LazyVGrid(columns: columns, spacing: 8) {
+            ForEach(appState.commandManager.commands) { command in
+              CommandButton(
+                command: command,
+                isEditing: viewModel.isEditMode,
+                isLoading: processingCommandId == command.id,
+                onTap: {
+                  processingCommandId = command.id
+                  Task {
+                    await processCommandAndCloseWhenDone(command)
+                  }
+                },
+                onEdit: {
+                  editingCommand = command
+                },
+                onDelete: {
+                  logger.debug("Deleting command: \(command.name)")
+                  appState.commandManager.deleteCommand(command)
                 }
-              },
-              onEdit: {
-                editingCommand = command
-              },
-              onDelete: {
-                logger.debug("Deleting command: \(command.name)")
-                appState.commandManager.deleteCommand(command)
-              }
-            )
+              )
+            }
           }
+          .padding(.horizontal, 16)
+        } else if !viewModel.isEditMode {
+          popupSelectionStatusView
+            .padding(.horizontal, 16)
         }
-        .padding(.horizontal, 16)
       }
 
       if viewModel.isEditMode {
@@ -142,13 +158,29 @@ struct PopupView: View {
       }
     }
     .padding(.bottom, 8)
-    .windowBackground(useGradient: useGradientTheme)
-    .overlay(
-      RoundedRectangle(cornerRadius: 12)
-        .strokeBorder(Color.gray.opacity(0.2), lineWidth: 1)
-    )
-    .clipShape(.rect(cornerRadius: 12))
-    .shadow(color: Color.black.opacity(0.2), radius: 10, y: 5)
+    .frame(maxWidth: .infinity, alignment: .top)
+    .background {
+      popupChromeShape
+        .fill(Color.clear)
+        .windowBackground(
+          useGradient: useGradientTheme,
+          cornerRadius: PopupChrome.cornerRadius
+        )
+        .overlay {
+          popupChromeShape
+            .strokeBorder(
+              Color.primary.opacity(PopupChrome.borderOpacity),
+              lineWidth: 1
+            )
+        }
+        .shadow(
+          color: Color.black.opacity(PopupChrome.shadowOpacity),
+          radius: PopupChrome.shadowRadius,
+          y: PopupChrome.shadowYOffset
+        )
+    }
+    .padding(PopupChrome.chromeInset)
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     // Sheet for editing individual command
     .sheet(item: $editingCommand) { command in
       let binding = Binding(
@@ -197,6 +229,52 @@ struct PopupView: View {
     }
   }
 
+  @ViewBuilder
+  private var popupSelectionStatusView: some View {
+    switch appState.popupSelectionState {
+    case .loading:
+      HStack(spacing: 10) {
+        ProgressView()
+          .controlSize(.small)
+        Text("Capturing selection...")
+          .foregroundStyle(.secondary)
+          .frame(maxWidth: .infinity, alignment: .leading)
+      }
+      .padding(.horizontal, 12)
+      .padding(.vertical, 10)
+      .background(Color(.controlBackgroundColor))
+      .clipShape(.rect(cornerRadius: 10))
+    case .empty:
+      HStack(spacing: 10) {
+        Image(systemName: "text.cursor")
+          .foregroundStyle(.secondary)
+        Text("No selection detected. You can still type a custom instruction.")
+          .foregroundStyle(.secondary)
+          .frame(maxWidth: .infinity, alignment: .leading)
+      }
+      .font(.callout)
+      .padding(.horizontal, 12)
+      .padding(.vertical, 10)
+      .background(Color(.controlBackgroundColor))
+      .clipShape(.rect(cornerRadius: 10))
+    case .failed(let message):
+      HStack(spacing: 10) {
+        Image(systemName: "exclamationmark.triangle.fill")
+          .foregroundStyle(.orange)
+        Text(message ?? "Could not capture the current selection.")
+          .foregroundStyle(.secondary)
+          .frame(maxWidth: .infinity, alignment: .leading)
+      }
+      .font(.callout)
+      .padding(.horizontal, 12)
+      .padding(.vertical, 10)
+      .background(Color(.controlBackgroundColor))
+      .clipShape(.rect(cornerRadius: 10))
+    case .idle, .ready:
+      EmptyView()
+    }
+  }
+
   @MainActor
   private func focusCustomInputIfNeeded() {
     guard !viewModel.isEditMode else { return }
@@ -212,7 +290,7 @@ struct PopupView: View {
   private func processCommandAndCloseWhenDone(
     _ command: CommandModel
   ) async {
-    guard !appState.selectedText.isEmpty else {
+    guard !appState.selectedText.isEmpty || !appState.selectedImages.isEmpty else {
       processingCommandId = nil
       return
     }
@@ -290,14 +368,35 @@ struct PopupView: View {
 
   @MainActor
   private func processCustomChange() {
-    guard !customText.isEmpty else { return }
+    guard !customText.isEmpty, !isCustomLoading else { return }
+    let instruction = customText
     isCustomLoading = true
-    processCustomInstruction(customText)
+
+    Task { @MainActor in
+      await processCustomInstruction(instruction)
+    }
   }
 
   @MainActor
-  private func processCustomInstruction(_ instruction: String) {
-    guard !instruction.isEmpty else { return }
+  private func processCustomInstruction(_ instruction: String) async {
+    guard !instruction.isEmpty else {
+      isCustomLoading = false
+      return
+    }
+
+    if let requestID = appState.popupCaptureRequestID,
+      appState.popupSelectionState == .loading
+    {
+      let captureState = await appState.waitForPopupSelectionCaptureCompletion(
+        for: requestID
+      )
+
+      if captureState == .idle {
+        isCustomLoading = false
+        return
+      }
+    }
+
     appState.isProcessing = true
 
     // Capture setting value once at the start

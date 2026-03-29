@@ -4,6 +4,14 @@ import UniformTypeIdentifiers
 
 private let logger = AppLogger.logger("AppState")
 
+enum PopupSelectionState: Equatable {
+    case idle
+    case loading
+    case ready
+    case empty
+    case failed(String?)
+}
+
 @Observable
 @MainActor
 final class AppState {
@@ -36,6 +44,13 @@ final class AppState {
     // Screen bounds of the text selection (AppKit coords), captured before command runs.
     // Used to anchor the processing HUD near the selected text.
     var selectedTextScreenBounds: NSRect? = nil
+    private(set) var popupSelectionState: PopupSelectionState = .idle
+    private(set) var popupCaptureRequestID: UUID?
+
+    @ObservationIgnored
+    private var popupCaptureCanceller: (() -> Void)?
+    @ObservationIgnored
+    private var popupCaptureWaiters: [UUID: [CheckedContinuation<PopupSelectionState, Never>]] = [:]
 
     var activeProvider: any AIProvider {
         switch currentProvider {
@@ -53,6 +68,103 @@ final class AppState {
             return openRouterProvider
         default:
             return localLLMProvider
+        }
+    }
+
+    // MARK: - Popup Selection Capture
+
+    func beginPopupSelectionCapture(requestID: UUID) {
+        if let previousRequestID = popupCaptureRequestID {
+            resolvePopupCaptureWaiters(
+                for: previousRequestID,
+                state: .idle
+            )
+        }
+        popupCaptureCanceller?()
+        popupCaptureCanceller = nil
+        popupCaptureRequestID = requestID
+        popupSelectionState = .loading
+        selectedText = ""
+        selectedImages = []
+        selectedAttributedText = nil
+    }
+
+    func setPopupSelectionCanceller(
+        _ canceller: @escaping () -> Void,
+        for requestID: UUID
+    ) {
+        guard popupCaptureRequestID == requestID else { return }
+        popupCaptureCanceller = canceller
+    }
+
+    func cancelPopupSelectionCapture(clearSelection: Bool = false) {
+        let requestID = popupCaptureRequestID
+        popupCaptureCanceller?()
+        popupCaptureCanceller = nil
+        popupCaptureRequestID = nil
+        popupSelectionState = .idle
+        if let requestID {
+            resolvePopupCaptureWaiters(for: requestID, state: .idle)
+        }
+
+        if clearSelection {
+            selectedText = ""
+            selectedImages = []
+            selectedAttributedText = nil
+        }
+    }
+
+    func applyPopupSelectionCaptureResult(
+        requestID: UUID,
+        richText: NSAttributedString?,
+        plainText: String,
+        images: [Data]
+    ) {
+        guard popupCaptureRequestID == requestID else { return }
+
+        popupCaptureCanceller = nil
+        selectedAttributedText = richText
+        selectedText = plainText
+        selectedImages = images
+        let finalState: PopupSelectionState =
+            (plainText.isEmpty && images.isEmpty) ? .empty : .ready
+        popupSelectionState = finalState
+        resolvePopupCaptureWaiters(for: requestID, state: finalState)
+    }
+
+    func failPopupSelectionCapture(
+        requestID: UUID,
+        message: String? = nil
+    ) {
+        guard popupCaptureRequestID == requestID else { return }
+
+        popupCaptureCanceller = nil
+        let finalState = PopupSelectionState.failed(message)
+        popupSelectionState = finalState
+        resolvePopupCaptureWaiters(for: requestID, state: finalState)
+    }
+
+    func waitForPopupSelectionCaptureCompletion(
+        for requestID: UUID
+    ) async -> PopupSelectionState {
+        guard popupCaptureRequestID == requestID else { return .idle }
+        guard popupSelectionState == .loading else { return popupSelectionState }
+
+        return await withCheckedContinuation { continuation in
+            popupCaptureWaiters[requestID, default: []].append(continuation)
+        }
+    }
+
+    private func resolvePopupCaptureWaiters(
+        for requestID: UUID,
+        state: PopupSelectionState
+    ) {
+        guard let waiters = popupCaptureWaiters.removeValue(forKey: requestID) else {
+            return
+        }
+
+        for waiter in waiters {
+            waiter.resume(returning: state)
         }
     }
 
@@ -529,11 +641,15 @@ final class AppState {
 extension NSMutableAttributedString {
     /// Transforms *self* so that `self.string == new`, preserving
     /// per-character attributes wherever possible.
+    ///
+    /// Uses String.Index → UTF-16 offset conversion so that emoji and other
+    /// multi-code-unit characters are handled correctly with NSRange.
     func applyCharacterDiff(from old: String, to new: String) {
-        // Build the diff
-        let diff = Array(new).difference(from: Array(old))
+        let oldChars = Array(old)
+        let newChars = Array(new)
+        let diff = newChars.difference(from: oldChars)
 
-        // Collect removals & insertions with their offsets
+        // Collect removals & insertions with their Character-level offsets
         var removals: [Int] = []
         var insertions: [(offset: Int, char: Character)] = []
 
@@ -546,18 +662,40 @@ extension NSMutableAttributedString {
             }
         }
 
-        // Apply removals back-to-front
-        for index in removals.sorted(by: >) {
-            deleteCharacters(in: NSRange(location: index, length: 1))
+        // Convert a Character-level offset in a string to a UTF-16 position
+        // suitable for NSRange.
+        func utf16Offset(characterOffset: Int, in str: String) -> Int {
+            let idx = str.index(str.startIndex, offsetBy: characterOffset)
+            return str.utf16.distance(from: str.utf16.startIndex, to: idx)
         }
 
-        // Apply insertions front-to-back
-        for (index, ch) in insertions.sorted(by: { $0.offset < $1.offset }) {
-            let inherited = index > 0
-                ? attributes(at: index - 1, effectiveRange: nil)
+        // Apply removals back-to-front so earlier indices stay valid.
+        // Use the *current* attributed string's backing string for index math,
+        // which initially equals `old`.
+        for charIdx in removals.sorted(by: >) {
+            let currentString = self.string
+            let utf16Pos = utf16Offset(characterOffset: charIdx, in: currentString)
+            let charStr = String(currentString[currentString.index(currentString.startIndex, offsetBy: charIdx)])
+            let utf16Len = charStr.utf16.count
+            deleteCharacters(in: NSRange(location: utf16Pos, length: utf16Len))
+        }
+
+        // Apply insertions front-to-back.
+        // After each insertion the string grows, so recalculate positions from
+        // the *current* backing string.
+        for (charIdx, ch) in insertions.sorted(by: { $0.offset < $1.offset }) {
+            let currentString = self.string
+            let utf16Pos: Int
+            if charIdx >= currentString.count {
+                utf16Pos = (currentString as NSString).length
+            } else {
+                utf16Pos = utf16Offset(characterOffset: charIdx, in: currentString)
+            }
+            let inherited = utf16Pos > 0
+                ? attributes(at: utf16Pos - 1, effectiveRange: nil)
                 : [:]
             let piece = NSAttributedString(string: String(ch), attributes: inherited)
-            insert(piece, at: index)
+            insert(piece, at: utf16Pos)
         }
     }
 }

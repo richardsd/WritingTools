@@ -84,6 +84,15 @@ class WindowManager: NSObject, NSWindowDelegate {
         AppState.shared.selectedImages = []
     }
 
+    @MainActor
+    func reactivatePopupIfVisible() {
+        guard let popupWindow, popupWindow.isVisible else { return }
+
+        NSApp.activate(ignoringOtherApps: true)
+        popupWindow.makeKeyAndOrderFront(nil)
+        popupWindow.orderFrontRegardless()
+    }
+
     // MARK: - Processing HUD
 
     @MainActor

@@ -6,6 +6,45 @@ import ImageIO
 
 private let logger = AppLogger.logger("AppDelegate")
 
+private struct PopupSelectionCaptureResult {
+    let richText: NSAttributedString?
+    let plainText: String
+    let images: [Data]
+}
+
+private struct PopupSelectionContext {
+    let previousApplication: NSRunningApplication?
+    let selectedTextScreenBounds: NSRect?
+    let accessibilitySelectedText: String
+}
+
+private enum PopupSelectionCaptureError: LocalizedError {
+    case copyEventCreationFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .copyEventCreationFailed:
+            return "Failed to trigger copy for the current selection."
+        }
+    }
+}
+
+private final class PopupSelectionCaptureHandle {
+    var isCancelled = false
+    var task: Task<Void, Never>? {
+        didSet {
+            if isCancelled {
+                task?.cancel()
+            }
+        }
+    }
+
+    func cancel() {
+        isCancelled = true
+        task?.cancel()
+    }
+}
+
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // Static status item to prevent deallocation
@@ -153,10 +192,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             try? await Task.sleep(for: .milliseconds(50)) // 50ms - increased for reliability
 
             // Wait for the pasteboard to actually change
-            await waitForPasteboardChange(pb, initialChangeCount: oldChangeCount)
+            let pasteboardChanged =
+                (try? await waitForPasteboardChange(pb, initialChangeCount: oldChangeCount))
+                ?? false
 
             // Only proceed if the pasteboard actually changed (new content was copied)
-            guard pb.changeCount > oldChangeCount else {
+            guard pasteboardChanged, pb.changeCount > oldChangeCount else {
                 logger.warning("No new content was copied for command: \(command.name) - change count didn't increase (old: \(oldChangeCount), new: \(pb.changeCount))")
                 return
             }
@@ -332,27 +373,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: - Fixed: Clipboard Monitoring (Replace polling)
 
-    private func waitForPasteboardChange(_ pb: NSPasteboard, initialChangeCount: Int) async {
+    private func waitForPasteboardChange(
+        _ pb: NSPasteboard,
+        initialChangeCount: Int
+    ) async throws -> Bool {
         let startTime = Date()
         let timeout: TimeInterval = 2.0 // Increased timeout
         let pollInterval: Duration = .milliseconds(5)
 
         while pb.changeCount == initialChangeCount && Date().timeIntervalSince(startTime) < timeout {
-            do {
-                try await Task.sleep(for: pollInterval)
-            } catch {
-                // Task was cancelled
-                logger.debug("Clipboard monitoring cancelled: \(error.localizedDescription)")
-                return
-            }
+            try Task.checkCancellation()
+            try await Task.sleep(for: pollInterval)
         }
+
+        try Task.checkCancellation()
 
         if pb.changeCount == initialChangeCount {
             logger.warning("Clipboard update timeout after \(timeout)s - no change detected")
+            return false
         } else {
             let elapsed = Date().timeIntervalSince(startTime)
             let formattedElapsed = elapsed.formatted(.number.precision(.fractionLength(3)))
             logger.debug("Clipboard changed after \(formattedElapsed)s")
+            return true
         }
     }
 
@@ -529,114 +572,195 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func showPopup() {
         appState.activeProvider.cancel()
 
-        Task { @MainActor in
-            if let frontApp = NSWorkspace.shared.frontmostApplication {
-                self.appState.previousApplication = frontApp
-            }
+        let previousApplication = NSWorkspace.shared.frontmostApplication
+        let selectionContext = PopupSelectionContext(
+            previousApplication: previousApplication,
+            selectedTextScreenBounds: self.selectedTextScreenBounds(),
+            accessibilitySelectedText: self.selectedTextViaAccessibility() ?? ""
+        )
+        self.appState.previousApplication = previousApplication
+        self.appState.selectedTextScreenBounds = selectionContext.selectedTextScreenBounds
 
-            // Capture selection bounds before we switch apps or touch the clipboard
-            self.appState.selectedTextScreenBounds = self.selectedTextScreenBounds()
+        self.closePopupWindow()
 
-            self.closePopupWindow()
+        let window = PopupWindow(appState: self.appState)
+        window.positionNearMouse()
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
 
-            let pb = NSPasteboard.general
-            let oldChangeCount = pb.changeCount
-
-            // Capture the ENTIRE clipboard state before copying
-            let clipboardSnapshot = pb.createSnapshot()
-            logger.debug("Captured clipboard snapshot with \(clipboardSnapshot.itemCount) items")
-
-            // Create and post Cmd+C event
-            let src = CGEventSource(stateID: .hidSystemState)
-            let kd = CGEvent(keyboardEventSource: src, virtualKey: 0x08, keyDown: true)
-            let ku = CGEvent(keyboardEventSource: src, virtualKey: 0x08, keyDown: false)
-            kd?.flags = .maskCommand
-            ku?.flags = .maskCommand
-
-            kd?.post(tap: .cgSessionEventTap)
-            ku?.post(tap: .cgSessionEventTap)
-
-            // Give the system a tiny moment to process the copy event
-            try? await Task.sleep(for: .milliseconds(50)) // 50ms - increased for reliability
-
-            await waitForPasteboardChange(pb, initialChangeCount: oldChangeCount)
-
-            var foundImages: [Data] = []
-            var rich: NSAttributedString? = nil
-            var plainText = ""
-
-            if pb.changeCount > oldChangeCount {
-                let classes = [NSURL.self]
-                let imageTypeIdentifiers = [
-                    UTType.image,
-                    UTType.png,
-                    UTType.jpeg,
-                    UTType.tiff,
-                    UTType.gif,
-                ].map(\.identifier)
-
-                let options: [NSPasteboard.ReadingOptionKey: Any] = [
-                    .urlReadingFileURLsOnly: true,
-                    .urlReadingContentsConformToTypes: imageTypeIdentifiers,
-                ]
-
-                if let urls = pb.readObjects(forClasses: classes, options: options) as? [URL] {
-                    let loadedImages = await loadImageData(from: urls)
-                    if !loadedImages.isEmpty {
-                        foundImages.append(contentsOf: loadedImages)
-                    }
-                }
-
-                if foundImages.isEmpty {
-                    let supportedImageTypes: [NSPasteboard.PasteboardType] = [
-                        NSPasteboard.PasteboardType(UTType.png.identifier),
-                        NSPasteboard.PasteboardType(UTType.jpeg.identifier),
-                        NSPasteboard.PasteboardType(UTType.tiff.identifier),
-                        NSPasteboard.PasteboardType(UTType.gif.identifier),
-                        NSPasteboard.PasteboardType(UTType.image.identifier),
-                    ]
-
-                    for type in supportedImageTypes {
-                        if let data = pb.data(forType: type) {
-                            foundImages.append(data)
-                            logger.debug("Found direct image data of type: \(type.rawValue)")
-                            break
-                        }
-                    }
-                }
-
-                // Read rich text and plain text BEFORE restoring clipboard
-                rich = pb.readAttributedSelection()
-                plainText = rich?.string ?? pb.string(forType: .string) ?? ""
-            } else {
-                logger.warning("Pasteboard did not change after copy; clearing selection to avoid stale context")
-            }
-
-            // Store data in appState BEFORE restoring clipboard
-            self.appState.selectedAttributedText = rich
-            self.appState.selectedText = plainText
-            self.appState.selectedImages = foundImages
-
-            // Restore original clipboard using the snapshot
-            pb.restore(snapshot: clipboardSnapshot)
-            logger.debug("Restored original clipboard after capturing selection")
-
-            let window = PopupWindow(appState: self.appState)
-            if !plainText.isEmpty || !foundImages.isEmpty {
-                window.setContentSize(NSSize(width: 400, height: 400))
-            } else {
-                window.setContentSize(NSSize(width: 400, height: 100))
-            }
-
-            window.positionNearMouse()
-            NSApp.activate(ignoringOtherApps: true)
-            window.makeKeyAndOrderFront(nil)
-            window.orderFrontRegardless()
-        }
+        startPopupSelectionCapture(using: selectionContext)
     }
 
     private func closePopupWindow() {
         WindowManager.shared.dismissPopup()
+    }
+
+    private func startPopupSelectionCapture(using context: PopupSelectionContext) {
+        let requestID = UUID()
+        let captureHandle = PopupSelectionCaptureHandle()
+        appState.beginPopupSelectionCapture(requestID: requestID)
+        appState.setPopupSelectionCanceller({
+            captureHandle.cancel()
+        }, for: requestID)
+
+        captureHandle.task = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            // Yield once so AppKit can present the popup before selection capture starts.
+            await Task.yield()
+
+            do {
+                let result = try await self.capturePopupSelection(using: context)
+                try Task.checkCancellation()
+
+                self.appState.applyPopupSelectionCaptureResult(
+                    requestID: requestID,
+                    richText: result.richText,
+                    plainText: result.plainText,
+                    images: result.images
+                )
+            } catch is CancellationError {
+                logger.debug("Popup selection capture cancelled")
+            } catch {
+                logger.error("Popup selection capture failed: \(error.localizedDescription)")
+                self.appState.failPopupSelectionCapture(
+                    requestID: requestID,
+                    message: error.localizedDescription
+                )
+            }
+
+            if self.appState.popupCaptureRequestID == requestID {
+                WindowManager.shared.reactivatePopupIfVisible()
+            }
+        }
+    }
+
+    private func capturePopupSelection(
+        using context: PopupSelectionContext
+    ) async throws -> PopupSelectionCaptureResult {
+        let pb = NSPasteboard.general
+        let oldChangeCount = pb.changeCount
+        let clipboardSnapshot = pb.createSnapshot()
+        logger.debug(
+            "Captured clipboard snapshot with \(clipboardSnapshot.itemCount) items for popup selection"
+        )
+
+        defer {
+            pb.restore(snapshot: clipboardSnapshot)
+            logger.debug("Restored original clipboard after capturing popup selection")
+        }
+
+        guard
+            let sourceApplication = context.previousApplication,
+            sourceApplication.processIdentifier != ProcessInfo.processInfo.processIdentifier
+        else {
+            logger.warning(
+                "No valid source application for popup capture; using accessibility fallback"
+            )
+            return popupFallbackSelectionResult(using: context)
+        }
+
+        sourceApplication.activate()
+        let sourceApplicationFocused = try await waitForApplicationToBecomeFrontmost(
+            sourceApplication
+        )
+
+        guard sourceApplicationFocused else {
+            logger.warning(
+                "Source application did not become frontmost for popup capture; using accessibility fallback"
+            )
+            return popupFallbackSelectionResult(using: context)
+        }
+
+        guard let src = CGEventSource(stateID: .hidSystemState),
+              let keyDown = CGEvent(
+                keyboardEventSource: src,
+                virtualKey: 0x08,
+                keyDown: true
+              ),
+              let keyUp = CGEvent(
+                keyboardEventSource: src,
+                virtualKey: 0x08,
+                keyDown: false
+              )
+        else {
+            throw PopupSelectionCaptureError.copyEventCreationFailed
+        }
+
+        keyDown.flags = .maskCommand
+        keyUp.flags = .maskCommand
+        keyDown.post(tap: .cgSessionEventTap)
+        keyUp.post(tap: .cgSessionEventTap)
+
+        try await Task.sleep(for: .milliseconds(50))
+
+        let pasteboardChanged = try await waitForPasteboardChange(
+            pb,
+            initialChangeCount: oldChangeCount
+        )
+
+        guard pasteboardChanged, pb.changeCount > oldChangeCount else {
+            logger.warning("Pasteboard did not change after popup copy; using accessibility fallback if available")
+            return popupFallbackSelectionResult(using: context)
+        }
+
+        var foundImages: [Data] = []
+
+        let classes = [NSURL.self]
+        let imageTypeIdentifiers = [
+            UTType.image,
+            UTType.png,
+            UTType.jpeg,
+            UTType.tiff,
+            UTType.gif,
+        ].map(\.identifier)
+
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [
+            .urlReadingFileURLsOnly: true,
+            .urlReadingContentsConformToTypes: imageTypeIdentifiers,
+        ]
+
+        if let urls = pb.readObjects(forClasses: classes, options: options) as? [URL] {
+            let loadedImages = await loadImageData(from: urls)
+            if !loadedImages.isEmpty {
+                foundImages.append(contentsOf: loadedImages)
+            }
+        }
+
+        if foundImages.isEmpty {
+            let supportedImageTypes: [NSPasteboard.PasteboardType] = [
+                NSPasteboard.PasteboardType(UTType.png.identifier),
+                NSPasteboard.PasteboardType(UTType.jpeg.identifier),
+                NSPasteboard.PasteboardType(UTType.tiff.identifier),
+                NSPasteboard.PasteboardType(UTType.gif.identifier),
+                NSPasteboard.PasteboardType(UTType.image.identifier),
+            ]
+
+            for type in supportedImageTypes {
+                if let data = pb.data(forType: type) {
+                    foundImages.append(data)
+                    logger.debug("Found direct image data of type: \(type.rawValue)")
+                    break
+                }
+            }
+        }
+
+        let richText = pb.readAttributedSelection()
+        let plainText = richText?.string ?? pb.string(forType: .string) ?? ""
+
+        guard !plainText.isEmpty || !foundImages.isEmpty else {
+            logger.warning(
+                "Pasteboard capture returned no text or images; using accessibility fallback if available"
+            )
+            return popupFallbackSelectionResult(using: context)
+        }
+
+        return PopupSelectionCaptureResult(
+            richText: richText,
+            plainText: plainText,
+            images: foundImages
+        )
     }
 
     // MARK: - Accessibility: selected text screen position
@@ -645,13 +769,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// selected text in the frontmost app via the Accessibility API.
     /// Returns nil if unavailable (e.g. app doesn't support AX text attributes).
     private func selectedTextScreenBounds() -> NSRect? {
-        let systemWide = AXUIElementCreateSystemWide()
-        var focusedRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            systemWide, kAXFocusedUIElementAttribute as CFString, &focusedRef
-        ) == .success, let focusedRef else { return nil }
-
-        let focused = focusedRef as! AXUIElement
+        guard let focused = focusedAccessibilityElement() else { return nil }
 
         var rangeRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
@@ -676,6 +794,83 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let flippedY = mainScreen.frame.height - quartzRect.origin.y - quartzRect.height
         return NSRect(x: quartzRect.origin.x, y: flippedY,
                       width: quartzRect.width, height: quartzRect.height)
+    }
+
+    private func focusedAccessibilityElement() -> AXUIElement? {
+        let systemWide = AXUIElementCreateSystemWide()
+        var focusedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            systemWide,
+            kAXFocusedUIElementAttribute as CFString,
+            &focusedRef
+        ) == .success,
+        let focusedRef
+        else {
+            return nil
+        }
+
+        guard CFGetTypeID(focusedRef) == AXUIElementGetTypeID() else {
+            return nil
+        }
+
+        return unsafeBitCast(focusedRef, to: AXUIElement.self)
+    }
+
+    private func selectedTextViaAccessibility() -> String? {
+        guard let focused = focusedAccessibilityElement() else { return nil }
+
+        var selectedTextRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            focused,
+            kAXSelectedTextAttribute as CFString,
+            &selectedTextRef
+        ) == .success,
+        let selectedTextRef
+        else {
+            return nil
+        }
+
+        if let selectedText = selectedTextRef as? String, !selectedText.isEmpty {
+            return selectedText
+        }
+
+        if let selectedText = selectedTextRef as? NSString, selectedText.length > 0 {
+            return selectedText as String
+        }
+
+        return nil
+    }
+
+    private func popupFallbackSelectionResult(
+        using context: PopupSelectionContext
+    ) -> PopupSelectionCaptureResult {
+        PopupSelectionCaptureResult(
+            richText: nil,
+            plainText: context.accessibilitySelectedText,
+            images: []
+        )
+    }
+
+    private func waitForApplicationToBecomeFrontmost(
+        _ application: NSRunningApplication
+    ) async throws -> Bool {
+        let startTime = Date()
+        let timeout: TimeInterval = 0.5
+
+        while Date().timeIntervalSince(startTime) < timeout {
+            try Task.checkCancellation()
+
+            if NSWorkspace.shared.frontmostApplication?.processIdentifier
+                == application.processIdentifier
+            {
+                return true
+            }
+
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        return NSWorkspace.shared.frontmostApplication?.processIdentifier
+            == application.processIdentifier
     }
 
     func windowWillClose(_ notification: Notification) {
