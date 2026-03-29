@@ -20,7 +20,7 @@ struct AnthropicSettingsView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     
-                    TextField("API Key", text: $settings.anthropicApiKey)
+                    SecureField("API Key", text: $settings.anthropicApiKey)
                         .textFieldStyle(.roundedBorder)
                         .onChange(of: settings.anthropicApiKey) { _, _ in needsSaving = true }
                 }

@@ -14,7 +14,7 @@ struct GeminiProviderSettingsView: View {
     VStack(alignment: .leading, spacing: 12) {
       Text("Configure Google Gemini AI")
         .font(.headline)
-      TextField("API Key", text: $settings.geminiApiKey)
+      SecureField("API Key", text: $settings.geminiApiKey)
         .textFieldStyle(.roundedBorder)
 
       Picker("Model", selection: $settings.geminiModel) {

@@ -19,7 +19,7 @@ struct MistralSettingsView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     
-                    TextField("API Key", text: $settings.mistralApiKey)
+                    SecureField("API Key", text: $settings.mistralApiKey)
                         .textFieldStyle(.roundedBorder)
                         .onChange(of: settings.mistralApiKey) { _, _ in
                             needsSaving = true

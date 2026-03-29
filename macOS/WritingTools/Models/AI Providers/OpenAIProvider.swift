@@ -249,25 +249,31 @@ final class OpenAIProvider: AIProvider {
         let server = CodexCallbackServer()
         self.callbackServer = server
         
-        // Open browser
-        let authorizeUrl = CodexAuth.buildAuthorizeUrl(pkce: pkce, state: state)
-        NSWorkspace.shared.open(authorizeUrl)
-        
-        // Wait for callback
         do {
-            let code = try await self.callbackServer!.start(expectedState: state)
+            try await server.startListening(expectedState: state)
+
+            let authorizeUrl = CodexAuth.buildAuthorizeUrl(pkce: pkce, state: state)
+            let callbackTask = Task {
+                try await server.waitForCallback()
+            }
+
+            guard NSWorkspace.shared.open(authorizeUrl) else {
+                callbackTask.cancel()
+                throw CodexAuthError.browserLaunchFailed
+            }
+
+            let code = try await callbackTask.value
             logger.debug("Received authorization code")
             
             // Exchange code for tokens
             try await completeOAuthFlow(code: code)
         } catch {
-            self.callbackServer = nil
-            self.pkceVerifier = nil
-            self.oauthState = nil
+            resetOAuthFlowState(stopServer: true)
             throw error
         }
     }
     
+    @MainActor
     private func completeOAuthFlow(code: String) async throws {
         guard let pkceVerifier = pkceVerifier else {
             throw CodexAuthError.invalidState
@@ -277,20 +283,28 @@ final class OpenAIProvider: AIProvider {
         let tokens = try await CodexAuth.exchangeCodeForTokens(code: code, pkceVerifier: pkceVerifier)
         
         // Save tokens to keychain
-        try await AppSettings.shared.saveOAuthTokens(tokens)
+        try AppSettings.shared.saveOAuthTokens(tokens)
         
         logger.debug("OAuth flow completed successfully")
         
         // Cleanup
-        self.callbackServer = nil
-        self.pkceVerifier = nil
-        self.oauthState = nil
+        resetOAuthFlowState()
     }
     
     @MainActor
     func signOutOAuth() throws {
         try AppSettings.shared.deleteOAuthTokens()
         logger.debug("Signed out from OAuth")
+    }
+
+    @MainActor
+    private func resetOAuthFlowState(stopServer: Bool = false) {
+        if stopServer {
+            callbackServer?.stop()
+        }
+        callbackServer = nil
+        pkceVerifier = nil
+        oauthState = nil
     }
     
     private func ensureValidOAuthToken() async throws -> String {

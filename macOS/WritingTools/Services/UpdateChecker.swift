@@ -4,6 +4,14 @@ import Observation
 
 private let logger = AppLogger.logger("UpdateChecker")
 
+enum UpdateCheckStatus: Equatable {
+    case idle
+    case checking
+    case updateAvailable(latestVersion: String)
+    case upToDate(currentVersion: String)
+    case failed(String)
+}
+
 @Observable
 @MainActor
 final class UpdateChecker {
@@ -11,9 +19,7 @@ final class UpdateChecker {
     private let updateCheckURL = "https://raw.githubusercontent.com/theJayTea/WritingTools/main/macOS/Latest_Version_for_Update_Check.txt"
     private let updateDownloadURL = "https://github.com/theJayTea/WritingTools/releases"
     
-    var isCheckingForUpdates = false
-    var updateAvailable = false
-    var checkError: String?
+    var status: UpdateCheckStatus = .idle
 
     private init() {}
 
@@ -59,20 +65,26 @@ final class UpdateChecker {
     
     @MainActor
     func checkForUpdates() async {
-        isCheckingForUpdates = true
-        checkError = nil
-        
-        defer {
-            isCheckingForUpdates = false
-        }
+        status = .checking
         
         guard let url = URL(string: updateCheckURL) else {
-            checkError = "Invalid update check URL"
+            status = .failed("Invalid update check URL")
             return
         }
 
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let (data, response) = try await URLSession.shared.data(from: url)
+
+            guard let httpResponse = response as? HTTPURLResponse else {
+                status = .failed("Invalid update server response")
+                return
+            }
+
+            guard (200...299).contains(httpResponse.statusCode) else {
+                logger.warning("Update check failed with HTTP \(httpResponse.statusCode)")
+                status = .failed("Failed to check for updates: HTTP \(httpResponse.statusCode)")
+                return
+            }
             
             // Print raw data for debugging
             if let rawString = String(data: data, encoding: .utf8) {
@@ -85,7 +97,7 @@ final class UpdateChecker {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
 
             guard let currentVersionString else {
-                checkError = "Current version unavailable"
+                status = .failed("Current version unavailable")
                 return
             }
 
@@ -93,15 +105,17 @@ final class UpdateChecker {
                !versionString.isEmpty,
                let hasUpdate = isUpdateAvailable(current: currentVersionString, latest: versionString) {
                 logger.debug("Parsed version: \(versionString)")
-                updateAvailable = hasUpdate
+                status = hasUpdate
+                    ? .updateAvailable(latestVersion: versionString)
+                    : .upToDate(currentVersion: currentVersionString)
             } else {
-                checkError = "Invalid version format"
+                status = .failed("Invalid version format")
                 if let cleanedString = cleanedString {
                     logger.warning("Failed to parse version from: '\(cleanedString)'")
                 }
             }
         } catch {
-            checkError = "Failed to check for updates: \(error.localizedDescription)"
+            status = .failed("Failed to check for updates: \(error.localizedDescription)")
         }
     }
     

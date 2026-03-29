@@ -14,7 +14,7 @@ struct AnthropicProviderSettingsView: View {
     VStack(alignment: .leading, spacing: 12) {
       Text("Configure Anthropic (Claude)")
         .font(.headline)
-      TextField("API Key", text: $settings.anthropicApiKey)
+      SecureField("API Key", text: $settings.anthropicApiKey)
         .textFieldStyle(.roundedBorder)
 
       Picker("Model", selection: $settings.anthropicModel) {

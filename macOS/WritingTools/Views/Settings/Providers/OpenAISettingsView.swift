@@ -164,7 +164,7 @@ struct OpenAISettingsView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 
-                TextField("API Key", text: $settings.openAIApiKey)
+                SecureField("API Key", text: $settings.openAIApiKey)
                     .textFieldStyle(.roundedBorder)
                     .onChange(of: settings.openAIApiKey) { _, _ in
                         needsSaving = true
@@ -509,4 +509,3 @@ struct DetailRow: View {
         }
     }
 }
-

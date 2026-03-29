@@ -13,6 +13,7 @@ private let logger = AppLogger.logger("CodexAuth")
 enum CodexAuthError: LocalizedError {
     case invalidState
     case missingCode
+    case browserLaunchFailed
     case tokenExchangeFailed(String)
     case tokenRefreshFailed(String)
     case invalidToken
@@ -23,6 +24,8 @@ enum CodexAuthError: LocalizedError {
             return "OAuth state validation failed"
         case .missingCode:
             return "Authorization code not received"
+        case .browserLaunchFailed:
+            return "Couldn't open the browser to continue authorization"
         case .tokenExchangeFailed(let message):
             return "Token exchange failed: \(message)"
         case .tokenRefreshFailed(let message):

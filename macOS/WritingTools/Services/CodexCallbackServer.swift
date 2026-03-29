@@ -42,41 +42,61 @@ class CodexCallbackServer: ObservableObject {
     
     private var listener: NWListener?
     private var expectedState: String?
-    private var continuation: CheckedContinuation<String, Error>?
+    private var readyContinuation: CheckedContinuation<Void, Error>?
+    private var callbackContinuation: CheckedContinuation<String, Error>?
+    private var pendingCallbackResult: Result<String, Error>?
     private var timeoutTask: Task<Void, Never>?
+    private var isStarting = false
     
-    func start(expectedState: String) async throws -> String {
-        guard !isListening else {
+    func startListening(expectedState: String) async throws {
+        guard !isListening, !isStarting, listener == nil else {
             throw CallbackServerError.portInUse
         }
         
         self.expectedState = expectedState
+        pendingCallbackResult = nil
+        isStarting = true
         
-        return try await withCheckedThrowingContinuation { continuation in
-            self.continuation = continuation
-            
-            do {
-                try setupListener()
-                startTimeout()
-            } catch {
-                self.continuation = nil
-                continuation.resume(throwing: error)
+        do {
+            try setupListener()
+            try await withCheckedThrowingContinuation { continuation in
+                self.readyContinuation = continuation
+            }
+            startTimeout()
+        } catch {
+            resetState()
+            throw error
+        }
+    }
+
+    func waitForCallback() async throws -> String {
+        try await withCheckedThrowingContinuation { continuation in
+            if let pendingCallbackResult {
+                self.pendingCallbackResult = nil
+                continuation.resume(with: pendingCallbackResult)
+            } else {
+                self.callbackContinuation = continuation
             }
         }
     }
     
     func stop() {
         logger.debug("Stopping callback server")
-        timeoutTask?.cancel()
-        timeoutTask = nil
-        listener?.cancel()
-        listener = nil
-        isListening = false
-        expectedState = nil
         
-        if let continuation = continuation {
-            self.continuation = nil
-            continuation.resume(throwing: CallbackServerError.cancelled)
+        let readyContinuation = self.readyContinuation
+        self.readyContinuation = nil
+
+        let callbackContinuation = self.callbackContinuation
+        self.callbackContinuation = nil
+
+        resetState()
+
+        if let readyContinuation {
+            readyContinuation.resume(throwing: CallbackServerError.cancelled)
+        }
+
+        if let callbackContinuation {
+            callbackContinuation.resume(throwing: CallbackServerError.cancelled)
         }
     }
     
@@ -117,7 +137,6 @@ class CodexCallbackServer: ObservableObject {
         }
         
         listener?.start(queue: .main)
-        isListening = true
         logger.debug("Callback server started on port \(CodexConstants.redirectPort)")
     }
     
@@ -125,9 +144,19 @@ class CodexCallbackServer: ObservableObject {
         switch state {
         case .ready:
             logger.debug("Listener ready")
+            isStarting = false
+            isListening = true
+            readyContinuation?.resume()
+            readyContinuation = nil
         case .failed(let error):
             logger.error("Listener failed: \(error.localizedDescription)")
-            completeWithError(CallbackServerError.portInUse)
+            if let readyContinuation {
+                self.readyContinuation = nil
+                resetState()
+                readyContinuation.resume(throwing: CallbackServerError.portInUse)
+            } else {
+                completeWithError(CallbackServerError.portInUse)
+            }
         case .cancelled:
             logger.debug("Listener cancelled")
         default:
@@ -211,9 +240,9 @@ class CodexCallbackServer: ObservableObject {
             return
         }
         
-        let expected = self.expectedState ?? "nil"
-        logger.error("State mismatch: expected \(expected), got \(receivedState)")
         guard receivedState == self.expectedState else {
+            let expected = self.expectedState ?? "nil"
+            logger.error("State mismatch: expected \(expected), got \(receivedState)")
             sendResponse(to: connection, statusCode: 400, body: "Invalid state parameter")
             completeWithError(CallbackServerError.invalidState)
             return
@@ -326,37 +355,50 @@ class CodexCallbackServer: ObservableObject {
     }
     
     private func completeWithCode(_ code: String) {
-        guard let continuation = continuation else { return }
-        self.continuation = nil
-        
         timeoutTask?.cancel()
         timeoutTask = nil
         
-        Task {
-            try? await Task.sleep(for: .milliseconds(500))
-            await MainActor.run {
-                stop()
-            }
+        if let callbackContinuation {
+            self.callbackContinuation = nil
+            callbackContinuation.resume(returning: code)
+        } else {
+            pendingCallbackResult = .success(code)
         }
-        
-        continuation.resume(returning: code)
+
+        scheduleStop()
     }
     
     private func completeWithError(_ error: Error) {
-        guard let continuation = continuation else { return }
-        self.continuation = nil
-        
         timeoutTask?.cancel()
         timeoutTask = nil
         
+        if let callbackContinuation {
+            self.callbackContinuation = nil
+            callbackContinuation.resume(throwing: error)
+        } else {
+            pendingCallbackResult = .failure(error)
+        }
+
+        scheduleStop()
+    }
+
+    private func scheduleStop() {
         Task {
             try? await Task.sleep(for: .milliseconds(500))
             await MainActor.run {
                 stop()
             }
         }
-        
-        continuation.resume(throwing: error)
+    }
+
+    private func resetState() {
+        timeoutTask?.cancel()
+        timeoutTask = nil
+        listener?.cancel()
+        listener = nil
+        isListening = false
+        isStarting = false
+        expectedState = nil
     }
     
     deinit {

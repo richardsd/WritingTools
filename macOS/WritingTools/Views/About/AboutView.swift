@@ -14,6 +14,22 @@ struct AboutView: View {
 
         return shortVersion ?? buildVersion ?? "Unknown"
     }
+
+    private var updateButtonTitle: String {
+        switch updateChecker.status {
+        case .updateAvailable:
+            return "Download Update"
+        default:
+            return "Check for Updates"
+        }
+    }
+
+    private var isCheckingForUpdates: Bool {
+        if case .checking = updateChecker.status {
+            return true
+        }
+        return false
+    }
     
     var body: some View {
         VStack(spacing: 12) {
@@ -68,37 +84,20 @@ struct AboutView: View {
                         .font(.caption)
                         .frame(maxWidth: .infinity, alignment: .leading)
 
-                    if updateChecker.isCheckingForUpdates {
-                        ProgressView("Checking for updates...")
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    } else if let error = updateChecker.checkError {
-                        Text(error)
-                            .foregroundStyle(.red)
-                            .font(.caption)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    } else if updateChecker.updateAvailable {
-                        Text("A new version is available!")
-                            .foregroundStyle(.green)
-                            .font(.caption)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    } else {
-                        Text("The latest version is already installed!")
-                            .foregroundStyle(.green)
-                            .font(.caption)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
+                    updateStatusView
 
                     HStack(spacing: 12) {
                         Button(action: {
-                            if updateChecker.updateAvailable {
+                            if case .updateAvailable = updateChecker.status {
                                 updateChecker.openReleasesPage()
                             } else {
                                 Task { await updateChecker.checkForUpdates() }
                             }
                         }) {
-                            Text(updateChecker.updateAvailable ? "Download Update" : "Check for Updates")
+                            Text(updateButtonTitle)
                         }
                         .buttonStyle(.borderedProminent)
+                        .disabled(isCheckingForUpdates)
 
                         Link("View Releases", destination: URL(string: "https://github.com/theJayTea/WritingTools/releases")!)
                             .buttonStyle(.link)
@@ -114,5 +113,34 @@ struct AboutView: View {
         .frame(minWidth: 400, minHeight: 380)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .windowBackground(useGradient: settings.useGradientTheme)
+    }
+
+    @ViewBuilder
+    private var updateStatusView: some View {
+        switch updateChecker.status {
+        case .idle:
+            Text("Check for updates to see whether a newer version is available.")
+                .foregroundStyle(.secondary)
+                .font(.caption)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        case .checking:
+            ProgressView("Checking for updates...")
+                .frame(maxWidth: .infinity, alignment: .leading)
+        case .failed(let error):
+            Text(error)
+                .foregroundStyle(.red)
+                .font(.caption)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        case .updateAvailable(let latestVersion):
+            Text("Version \(latestVersion) is available!")
+                .foregroundStyle(.green)
+                .font(.caption)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        case .upToDate(let currentVersion):
+            Text("The latest version is already installed (\(currentVersion)).")
+                .foregroundStyle(.green)
+                .font(.caption)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }

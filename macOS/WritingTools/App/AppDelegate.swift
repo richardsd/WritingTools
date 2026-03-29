@@ -785,15 +785,33 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         ) == .success, let boundsRef else { return nil }
 
         var quartzRect = CGRect.zero
-        guard AXValueGetValue(boundsRef as! AXValue, .cgRect, &quartzRect),
-              !quartzRect.isEmpty,
-              let mainScreen = NSScreen.main
+        guard CFGetTypeID(boundsRef) == AXValueGetTypeID() else { return nil }
+
+        let axValue = unsafeBitCast(boundsRef, to: AXValue.self)
+        guard AXValueGetType(axValue) == .cgRect,
+              AXValueGetValue(axValue, .cgRect, &quartzRect),
+              !quartzRect.isEmpty
         else { return nil }
 
-        // Quartz uses top-left origin; AppKit uses bottom-left — flip Y.
-        let flippedY = mainScreen.frame.height - quartzRect.origin.y - quartzRect.height
-        return NSRect(x: quartzRect.origin.x, y: flippedY,
-                      width: quartzRect.width, height: quartzRect.height)
+        return appKitSelectionRect(from: quartzRect)
+    }
+
+    private func appKitSelectionRect(from quartzRect: CGRect) -> NSRect? {
+        for screen in NSScreen.screens {
+            let convertedRect = NSRect(
+                x: quartzRect.origin.x,
+                y: screen.frame.maxY - quartzRect.origin.y - quartzRect.height,
+                width: quartzRect.width,
+                height: quartzRect.height
+            )
+
+            let midpoint = NSPoint(x: convertedRect.midX, y: convertedRect.midY)
+            if screen.frame.contains(midpoint) || screen.frame.intersects(convertedRect) {
+                return convertedRect
+            }
+        }
+
+        return nil
     }
 
     private func focusedAccessibilityElement() -> AXUIElement? {

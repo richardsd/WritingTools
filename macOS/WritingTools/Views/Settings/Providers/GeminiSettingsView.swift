@@ -19,7 +19,7 @@ struct GeminiSettingsView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     
-                    TextField("API Key", text: $settings.geminiApiKey)
+                    SecureField("API Key", text: $settings.geminiApiKey)
                         .textFieldStyle(.roundedBorder)
                         .onChange(of: settings.geminiApiKey) { _, _ in
                             needsSaving = true
