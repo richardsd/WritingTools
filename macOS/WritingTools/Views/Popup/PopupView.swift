@@ -9,6 +9,29 @@ final class PopupViewModel {
   var isEditMode: Bool = false
 }
 
+private struct PopupPaletteSection: Identifiable {
+  let title: String
+  let items: [PopupPaletteItem]
+
+  var id: String { title }
+}
+
+private struct PopupPaletteItem: Identifiable {
+  enum Kind {
+    case command(CommandModel)
+    case history(HistoryEntry)
+    case customInstruction(String)
+  }
+
+  let id: String
+  let title: String
+  let subtitle: String
+  let icon: String
+  let kind: Kind
+  let isDisabled: Bool
+  let isFavorite: Bool
+}
+
 struct PopupView: View {
   @Bindable var appState: AppState
   @Bindable var viewModel: PopupViewModel
@@ -19,6 +42,8 @@ struct PopupView: View {
   @State private var customText: String = ""
   @State private var isCustomLoading: Bool = false
   @State private var processingCommandId: UUID? = nil
+  @State private var historyManager = HistoryManager.shared
+  @State private var selectedPaletteItemID: String? = nil
 
   @State private var showingCommandsView = false
   @State private var editingCommand: CommandModel? = nil
@@ -37,10 +62,6 @@ struct PopupView: View {
 
   private var hasCapturedContent: Bool {
     !appState.selectedText.isEmpty || !appState.selectedImages.isEmpty
-  }
-
-  private var shouldShowSelectionSection: Bool {
-    viewModel.isEditMode || appState.popupSelectionState != .idle || hasCapturedContent
   }
 
   private var popupChromeShape: RoundedRectangle {
@@ -92,10 +113,9 @@ struct PopupView: View {
       .padding(.horizontal, 10)
       .padding(.top, 10)
 
-      // Custom input with send button
       if !viewModel.isEditMode {
         TextField(
-          "Describe your change...",
+          "Search commands or type a custom instruction...",
           text: $customText
         )
         .focused($isCustomInputFocused)
@@ -103,46 +123,44 @@ struct PopupView: View {
         .appleStyleTextField(
           text: customText,
           isLoading: isCustomLoading,
-          onSubmit: processCustomChange
+          onSubmit: executeSelectedPaletteItem
         )
         .padding(.horizontal, 10)
-      }
-
-      if shouldShowSelectionSection {
-        Divider()
-          .padding(.horizontal, 10)
-
-        if hasCapturedContent {
-          LazyVGrid(columns: columns, spacing: 8) {
-            ForEach(appState.commandManager.commands) { command in
-              CommandButton(
-                command: command,
-                isEditing: viewModel.isEditMode,
-                isLoading: processingCommandId == command.id,
-                onTap: {
-                  processingCommandId = command.id
-                  Task {
-                    await processCommandAndCloseWhenDone(command)
-                  }
-                },
-                onEdit: {
-                  editingCommand = command
-                },
-                onDelete: {
-                  logger.debug("Deleting command: \(command.name)")
-                  appState.commandManager.deleteCommand(command)
-                }
-              )
-            }
-          }
+        popupContextHeader
           .padding(.horizontal, 16)
-        } else if !viewModel.isEditMode {
-          popupSelectionStatusView
-            .padding(.horizontal, 16)
-        }
+        popupSelectionStatusView
+          .padding(.horizontal, 16)
+        paletteListView
       }
 
       if viewModel.isEditMode {
+        Divider()
+          .padding(.horizontal, 10)
+
+        LazyVGrid(columns: columns, spacing: 8) {
+          ForEach(appState.commandManager.commands) { command in
+            CommandButton(
+              command: command,
+              isEditing: viewModel.isEditMode,
+              isLoading: processingCommandId == command.id,
+              onTap: {
+                processingCommandId = command.id
+                Task {
+                  await processCommandAndCloseWhenDone(command)
+                }
+              },
+              onEdit: {
+                editingCommand = command
+              },
+              onDelete: {
+                logger.debug("Deleting command: \(command.name)")
+                appState.commandManager.deleteCommand(command)
+              }
+            )
+          }
+        }
+        .padding(.horizontal, 16)
+
         Button(action: { showingCommandsView = true }) {
           HStack {
             Image(systemName: "plus.circle.fill")
@@ -181,6 +199,16 @@ struct PopupView: View {
     }
     .padding(PopupChrome.chromeInset)
     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    .background {
+      if !viewModel.isEditMode {
+        PopupKeyMonitor(
+          onMoveUp: { moveSelection(delta: -1) },
+          onMoveDown: { moveSelection(delta: 1) },
+          onReturn: { executeSelectedPaletteItem() },
+          onEscape: { closeAction() }
+        )
+      }
+    }
     // Sheet for editing individual command
     .sheet(item: $editingCommand) { command in
       let binding = Binding(
@@ -219,13 +247,21 @@ struct PopupView: View {
     }
     .task {
       focusCustomInputIfNeeded()
+      ensurePaletteSelection()
     }
     .onChange(of: viewModel.isEditMode) { _, isEditMode in
       if isEditMode {
         isCustomInputFocused = false
       } else {
         focusCustomInputIfNeeded()
+        ensurePaletteSelection()
       }
+    }
+    .onChange(of: customText) { _, _ in
+      ensurePaletteSelection()
+    }
+    .onChange(of: paletteSignature) { _, _ in
+      ensurePaletteSelection()
     }
   }
 
@@ -275,6 +311,498 @@ struct PopupView: View {
     }
   }
 
+  @ViewBuilder
+  private var popupContextHeader: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      HStack(spacing: 8) {
+        ContextChip(
+          icon: "app.badge",
+          text: appState.previousApplication?.localizedName ?? "No app"
+        )
+
+        if let matchedProfileName {
+          ContextChip(
+            icon: "person.crop.rectangle.stack",
+            text: matchedProfileName
+          )
+        }
+
+        ContextChip(
+          icon: "cpu",
+          text: providerSummary
+        )
+      }
+
+      HStack(spacing: 8) {
+        ContextChip(
+          icon: hasCapturedContent ? "selection.pin.in.out" : "text.cursor",
+          text: selectionSummary
+        )
+
+        if !customText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+          ContextChip(
+            icon: "magnifyingglass",
+            text: "\(visiblePaletteItems.count) results"
+          )
+        }
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+  }
+
+  private var matchedProfileName: String? {
+    guard let app = appState.previousApplication else { return nil }
+    return AppProfileService.shared
+      .resolveProfile(for: ActiveAppContext(from: app))?
+      .name
+  }
+
+  private var providerSummary: String {
+    let providerName = friendlyProviderName(appState.currentProvider)
+    let modelName = appState.activeProvider.modelDisplayName
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    return modelName.isEmpty ? providerName : "\(providerName) · \(modelName)"
+  }
+
+  private var selectionSummary: String {
+    if !appState.selectedText.isEmpty && !appState.selectedImages.isEmpty {
+      return "\(appState.selectedText.count) chars + \(appState.selectedImages.count) image(s)"
+    }
+
+    if !appState.selectedText.isEmpty {
+      return "\(appState.selectedText.count) characters selected"
+    }
+
+    if !appState.selectedImages.isEmpty {
+      return "\(appState.selectedImages.count) image(s) selected"
+    }
+
+    switch appState.popupSelectionState {
+    case .loading:
+      return "Capturing selection"
+    case .failed:
+      return "Selection capture failed"
+    default:
+      return "No selection"
+    }
+  }
+
+  @ViewBuilder
+  private var paletteListView: some View {
+    if visiblePaletteItems.isEmpty {
+      VStack(spacing: 8) {
+        Image(systemName: "magnifyingglass")
+          .font(.title3)
+          .foregroundStyle(.secondary)
+        Text(
+          customText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "No commands available."
+            : "No matching commands."
+        )
+        .foregroundStyle(.secondary)
+      }
+      .frame(maxWidth: .infinity, minHeight: 120)
+      .padding(.horizontal, 16)
+    } else {
+      ScrollViewReader { proxy in
+        ScrollView {
+          LazyVStack(alignment: .leading, spacing: 12) {
+            ForEach(paletteSections) { section in
+              VStack(alignment: .leading, spacing: 6) {
+                Text(section.title)
+                  .font(.caption)
+                  .foregroundStyle(.secondary)
+                  .textCase(.uppercase)
+
+                VStack(spacing: 4) {
+                  ForEach(section.items) { item in
+                    PopupPaletteRow(
+                      item: item,
+                      isSelected: item.id == selectedPaletteItemID
+                    ) {
+                      executePaletteItem(item)
+                    }
+                    .id(item.id)
+                  }
+                }
+              }
+            }
+          }
+          .padding(.horizontal, 16)
+          .padding(.bottom, 8)
+        }
+        .frame(minHeight: 180, maxHeight: 320)
+        .onChange(of: selectedPaletteItemID) { _, newValue in
+          guard let newValue else { return }
+          withAnimation(.easeInOut(duration: 0.12)) {
+            proxy.scrollTo(newValue, anchor: .center)
+          }
+        }
+      }
+    }
+  }
+
+  private var paletteSections: [PopupPaletteSection] {
+    let query = customText.trimmingCharacters(in: .whitespacesAndNewlines)
+      .lowercased()
+    let commands = appState.commandManager.commands
+    let rankedCommands = commands
+      .filter { matches(command: $0, query: query) }
+      .sorted { lhs, rhs in
+        rankedScore(for: lhs, query: query) > rankedScore(for: rhs, query: query)
+      }
+
+    var sections: [PopupPaletteSection] = []
+    var seenCommandIDs = Set<UUID>()
+
+    func appendCommandSection(
+      title: String,
+      commands: [CommandModel]
+    ) {
+      let items = commands.compactMap { command -> PopupPaletteItem? in
+        guard !seenCommandIDs.contains(command.id) else { return nil }
+        seenCommandIDs.insert(command.id)
+        return paletteItem(for: command)
+      }
+
+      if !items.isEmpty {
+        sections.append(PopupPaletteSection(title: title, items: items))
+      }
+    }
+
+    appendCommandSection(
+      title: "Suggested",
+      commands: Array(rankedCommands.prefix(query.isEmpty ? 4 : 6))
+    )
+    appendCommandSection(
+      title: "Favorites",
+      commands: rankedCommands.filter(\.isFavorite)
+    )
+    appendCommandSection(
+      title: "Recent",
+      commands: recentCommands(from: rankedCommands)
+    )
+    appendCommandSection(
+      title: "All Commands",
+      commands: rankedCommands
+    )
+
+    let historyItems = recentHistoryItems(query: query)
+    if !historyItems.isEmpty {
+      sections.append(PopupPaletteSection(title: "Recent History", items: historyItems))
+    }
+
+    if !query.isEmpty {
+      sections.append(
+        PopupPaletteSection(
+          title: "Custom Instruction",
+          items: [customInstructionItem(for: customText)]
+        )
+      )
+    }
+
+    return sections
+  }
+
+  private var visiblePaletteItems: [PopupPaletteItem] {
+    paletteSections.flatMap(\.items)
+  }
+
+  private var paletteSignature: String {
+    visiblePaletteItems.map(\.id).joined(separator: "|")
+  }
+
+  private func recentCommands(
+    from rankedCommands: [CommandModel]
+  ) -> [CommandModel] {
+    let rankedByID = Dictionary(uniqueKeysWithValues: rankedCommands.map { ($0.id, $0) })
+    var recent: [CommandModel] = []
+    var seen = Set<UUID>()
+
+    for entry in historyManager.entries {
+      guard let commandId = entry.commandId,
+            let command = rankedByID[commandId],
+            !seen.contains(commandId) else {
+        continue
+      }
+
+      seen.insert(commandId)
+      recent.append(command)
+
+      if recent.count == 4 {
+        break
+      }
+    }
+
+    return recent
+  }
+
+  private func recentHistoryItems(query: String) -> [PopupPaletteItem] {
+    let currentBundleID = appState.previousApplication?.bundleIdentifier
+    let filteredEntries = historyManager.entries.filter { entry in
+      let matchesQuery = query.isEmpty
+        || entry.commandName.localizedCaseInsensitiveContains(query)
+        || entry.inputText.localizedCaseInsensitiveContains(query)
+        || entry.outputText.localizedCaseInsensitiveContains(query)
+
+      return matchesQuery
+    }
+
+    let prioritizedEntries = filteredEntries.sorted { lhs, rhs in
+      let lhsMatchesApp = lhs.sourceAppBundleId == currentBundleID
+      let rhsMatchesApp = rhs.sourceAppBundleId == currentBundleID
+
+      if lhsMatchesApp != rhsMatchesApp {
+        return lhsMatchesApp
+      }
+
+      return lhs.timestamp > rhs.timestamp
+    }
+
+    return Array(prioritizedEntries.prefix(3)).map { entry in
+      PopupPaletteItem(
+        id: "history-\(entry.id.uuidString)",
+        title: entry.commandName,
+        subtitle: entry.inputText,
+        icon: "clock.arrow.circlepath",
+        kind: .history(entry),
+        isDisabled: false,
+        isFavorite: false
+      )
+    }
+  }
+
+  private func paletteItem(for command: CommandModel) -> PopupPaletteItem {
+    let modeLabel: String
+    let effectiveExecutionMode = appState.resolvedExecutionMode(for: command)
+
+    switch effectiveExecutionMode {
+    case .instantApply:
+      if command.executionMode == .reviewBeforeApply {
+        modeLabel = "Instant apply (Preview off)"
+      } else {
+        modeLabel = "Instant apply"
+      }
+    case .reviewBeforeApply:
+      modeLabel = "Review first"
+    case .responseWindow:
+      modeLabel = "Response window"
+    }
+
+    let providerLabel =
+      command.providerOverride.map(friendlyProviderName)
+      ?? friendlyProviderName(appState.currentProvider)
+
+    return PopupPaletteItem(
+      id: "command-\(command.id.uuidString)",
+      title: command.name,
+      subtitle: "\(modeLabel) · \(providerLabel)",
+      icon: command.icon,
+      kind: .command(command),
+      isDisabled: command.requiresSelectedText
+        ? appState.selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
+          .isEmpty
+        : !hasCapturedContent,
+      isFavorite: command.isFavorite
+    )
+  }
+
+  private func customInstructionItem(for instruction: String) -> PopupPaletteItem {
+    let trimmed = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+    return PopupPaletteItem(
+      id: "custom-\(trimmed)",
+      title: "Run custom instruction",
+      subtitle: trimmed,
+      icon: "text.bubble",
+      kind: .customInstruction(trimmed),
+      isDisabled: trimmed.isEmpty,
+      isFavorite: false
+    )
+  }
+
+  private func matches(command: CommandModel, query: String) -> Bool {
+    guard !query.isEmpty else { return true }
+
+    return command.name.localizedCaseInsensitiveContains(query)
+      || command.prompt.localizedCaseInsensitiveContains(query)
+  }
+
+  private func rankedScore(for command: CommandModel, query: String) -> Int {
+    let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+      .lowercased()
+    let normalizedName = command.name.lowercased()
+    let currentBundleID = appState.previousApplication?.bundleIdentifier
+
+    var score = 0
+
+    if command.isFavorite {
+      score += 250
+    }
+
+    if normalizedQuery.isEmpty {
+      score += command.isBuiltIn ? 10 : 0
+    } else if normalizedName == normalizedQuery {
+      score += 300
+    } else if normalizedName.hasPrefix(normalizedQuery) {
+      score += 220
+    } else if normalizedName.contains(normalizedQuery) {
+      score += 140
+    } else if command.prompt.lowercased().contains(normalizedQuery) {
+      score += 40
+    }
+
+    if let providerOverride = command.providerOverride {
+      if providerOverride == appState.currentProvider {
+        score += 20
+      }
+    } else {
+      score += 10
+    }
+
+    if let matchedProfileName {
+      if matchedProfileName.localizedCaseInsensitiveContains("Code"),
+         command.preserveFormatting {
+        score += 10
+      }
+
+      if matchedProfileName.localizedCaseInsensitiveContains("Mail")
+        || matchedProfileName.localizedCaseInsensitiveContains("Teams")
+        || matchedProfileName.localizedCaseInsensitiveContains("Slack") {
+        let lowercaseName = command.name.lowercased()
+        if lowercaseName.contains("professional")
+          || lowercaseName.contains("friendly")
+          || lowercaseName.contains("proofread") {
+          score += 16
+        }
+      }
+    }
+
+    if let entryIndex = historyManager.entries.firstIndex(where: { $0.commandId == command.id }) {
+      score += max(120 - (entryIndex * 12), 20)
+    }
+
+    if let currentBundleID,
+       historyManager.entries.contains(where: {
+         $0.commandId == command.id && $0.sourceAppBundleId == currentBundleID
+       }) {
+      score += 110
+    }
+
+    return score
+  }
+
+  private func friendlyProviderName(_ provider: String) -> String {
+    switch provider {
+    case "openai":
+      return "OpenAI"
+    case "gemini":
+      return "Gemini"
+    case "anthropic":
+      return "Anthropic"
+    case "ollama":
+      return "Ollama"
+    case "mistral":
+      return "Mistral"
+    case "openrouter":
+      return "OpenRouter"
+    case "local":
+      return "Local LLM"
+    case "custom":
+      return "Custom"
+    default:
+      return provider.capitalized
+    }
+  }
+
+  @MainActor
+  private func ensurePaletteSelection() {
+    guard !viewModel.isEditMode else { return }
+
+    if let selectedPaletteItemID,
+       let currentItem = visiblePaletteItems.first(where: {
+         $0.id == selectedPaletteItemID
+       }),
+       !currentItem.isDisabled {
+      return
+    }
+
+    selectedPaletteItemID =
+      visiblePaletteItems.first(where: { !$0.isDisabled })?.id
+      ?? visiblePaletteItems.first?.id
+  }
+
+  private func moveSelection(delta: Int) {
+    guard !visiblePaletteItems.isEmpty else { return }
+
+    var nextIndex = visiblePaletteItems.firstIndex(where: {
+      $0.id == selectedPaletteItemID
+    }) ?? 0
+
+    while true {
+      let proposedIndex = min(
+        max(nextIndex + delta, 0),
+        visiblePaletteItems.count - 1
+      )
+
+      if proposedIndex == nextIndex {
+        break
+      }
+
+      nextIndex = proposedIndex
+      if !visiblePaletteItems[nextIndex].isDisabled {
+        selectedPaletteItemID = visiblePaletteItems[nextIndex].id
+        return
+      }
+    }
+
+    selectedPaletteItemID = visiblePaletteItems[nextIndex].id
+  }
+
+  @MainActor
+  private func executeSelectedPaletteItem() {
+    if let selectedItem = visiblePaletteItems.first(where: {
+      $0.id == selectedPaletteItemID
+    }) {
+      if selectedItem.isDisabled,
+         let fallbackCustomInstruction = visiblePaletteItems.first(where: { item in
+           if case .customInstruction = item.kind {
+             return !item.isDisabled
+           }
+           return false
+         }) {
+        executePaletteItem(fallbackCustomInstruction)
+      } else {
+        executePaletteItem(selectedItem)
+      }
+    } else if !customText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      processCustomChange()
+    }
+  }
+
+  @MainActor
+  private func executePaletteItem(_ item: PopupPaletteItem) {
+    guard !item.isDisabled else { return }
+
+    switch item.kind {
+    case .command(let command):
+      processingCommandId = command.id
+      Task {
+        await processCommandAndCloseWhenDone(command)
+      }
+    case .history(let entry):
+      let success = HistoryManager.shared.rerun(entry)
+      if success {
+        closeAction()
+      } else {
+        errorMessage = "The command '\(entry.commandName)' no longer exists and cannot be re-run."
+        showingErrorAlert = true
+      }
+    case .customInstruction(let instruction):
+      customText = instruction
+      processCustomChange()
+    }
+  }
+
   @MainActor
   private func focusCustomInputIfNeeded() {
     guard !viewModel.isEditMode else { return }
@@ -290,79 +818,9 @@ struct PopupView: View {
   private func processCommandAndCloseWhenDone(
     _ command: CommandModel
   ) async {
-    guard !appState.selectedText.isEmpty || !appState.selectedImages.isEmpty else {
+    await appState.executeCommand(command, closePopup: closeAction)
+    await MainActor.run {
       processingCommandId = nil
-      return
-    }
-
-    appState.isProcessing = true
-
-    let provider = appState.getProvider(for: command)
-    let systemPrompt = command.prompt
-    let userText = appState.selectedText
-    let images = appState.selectedImages
-
-    if command.useResponseWindow {
-      await MainActor.run {
-        processingCommandId = nil
-        presentResponseWindow(
-          title: command.name,
-          initialMessages: [],
-          selectedText: userText,
-          option: .proofread,
-          provider: provider,
-          systemPrompt: systemPrompt,
-          userPrompt: userText,
-          images: images
-        )
-      }
-      return
-    }
-
-    closeAction()
-
-    await MainActor.run {
-      WindowManager.shared.showProcessingHUD(
-        commandName: command.name,
-        commandIcon: command.icon,
-        onCancel: { [weak appState] in
-          provider.cancel()
-          appState?.isProcessing = false
-        }
-      )
-    }
-
-    do {
-      let result = try await provider.processText(
-        systemPrompt: systemPrompt,
-        userPrompt: userText,
-        images: images,
-        streaming: false
-      )
-
-      await MainActor.run {
-        WindowManager.shared.dismissProcessingHUD()
-
-        if command.preserveFormatting {
-          appState.replaceSelectedTextPreservingAttributes(with: result)
-        } else {
-          appState.replaceSelectedText(with: result)
-        }
-
-        processingCommandId = nil
-      }
-    } catch {
-      logger.error("Error processing command: \(error.localizedDescription)")
-      await MainActor.run {
-        WindowManager.shared.dismissProcessingHUD()
-        errorMessage = error.localizedDescription
-        showingErrorAlert = true
-        processingCommandId = nil
-      }
-    }
-
-    await MainActor.run {
-      appState.isProcessing = false
     }
   }
 
@@ -521,10 +979,156 @@ struct PopupView: View {
       viewModel.startInitialResponse(
         systemPrompt: systemPrompt,
         userPrompt: userPrompt,
-        images: images
-      ) {
+        images: images,
+        onFinish: {
         appState.isProcessing = false
+        }
+      )
+    }
+  }
+}
+
+private struct ContextChip: View {
+  let icon: String
+  let text: String
+
+  var body: some View {
+    Label(text, systemImage: icon)
+      .font(.caption)
+      .lineLimit(1)
+      .padding(.horizontal, 8)
+      .padding(.vertical, 5)
+      .background(Color(.controlBackgroundColor), in: Capsule())
+  }
+}
+
+private struct PopupPaletteRow: View {
+  let item: PopupPaletteItem
+  let isSelected: Bool
+  let onActivate: () -> Void
+
+  var body: some View {
+    Button(action: onActivate) {
+      HStack(spacing: 10) {
+        Image(systemName: item.icon)
+          .foregroundStyle(item.isDisabled ? .secondary : Color.accentColor)
+          .frame(width: 18)
+
+        VStack(alignment: .leading, spacing: 3) {
+          HStack(spacing: 6) {
+            Text(item.title)
+              .foregroundStyle(item.isDisabled ? .secondary : .primary)
+              .lineLimit(1)
+
+            if item.isFavorite {
+              Image(systemName: "star.fill")
+                .font(.caption2)
+                .foregroundStyle(.yellow)
+            }
+          }
+
+          Text(item.subtitle)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        }
+
+        Spacer()
+
+        if isSelected {
+          Image(systemName: "return")
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+        }
       }
+      .padding(.horizontal, 12)
+      .padding(.vertical, 9)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .background(
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+          .fill(isSelected ? Color.accentColor.opacity(0.14) : Color(.controlBackgroundColor))
+      )
+      .overlay {
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+          .strokeBorder(
+            isSelected ? Color.accentColor.opacity(0.35) : Color.clear,
+            lineWidth: 1
+          )
+      }
+      .opacity(item.isDisabled ? 0.55 : 1)
+    }
+    .buttonStyle(.plain)
+    .disabled(item.isDisabled)
+  }
+}
+
+private struct PopupKeyMonitor: NSViewRepresentable {
+  let onMoveUp: () -> Void
+  let onMoveDown: () -> Void
+  let onReturn: () -> Void
+  let onEscape: () -> Void
+
+  func makeCoordinator() -> Coordinator {
+    Coordinator(self)
+  }
+
+  func makeNSView(context: Context) -> NSView {
+    let view = NSView(frame: .zero)
+    context.coordinator.startMonitoring()
+    return view
+  }
+
+  func updateNSView(_ nsView: NSView, context: Context) {
+    context.coordinator.parent = self
+  }
+
+  static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+    coordinator.stopMonitoring()
+  }
+
+  final class Coordinator {
+    var parent: PopupKeyMonitor
+    private var monitor: Any?
+
+    init(_ parent: PopupKeyMonitor) {
+      self.parent = parent
+    }
+
+    func startMonitoring() {
+      guard monitor == nil else { return }
+
+      monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        guard let self else { return event }
+        guard NSApp.keyWindow is PopupWindow else { return event }
+
+        switch event.keyCode {
+        case 126:
+          self.parent.onMoveUp()
+          return nil
+        case 125:
+          self.parent.onMoveDown()
+          return nil
+        case 36:
+          self.parent.onReturn()
+          return nil
+        case 53:
+          self.parent.onEscape()
+          return nil
+        default:
+          return event
+        }
+      }
+    }
+
+    func stopMonitoring() {
+      if let monitor {
+        NSEvent.removeMonitor(monitor)
+        self.monitor = nil
+      }
+    }
+
+    deinit {
+      stopMonitoring()
     }
   }
 }

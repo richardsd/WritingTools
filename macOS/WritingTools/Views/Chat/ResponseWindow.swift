@@ -24,6 +24,12 @@ class ResponseWindow: NSWindow {
         self.isReleasedWhenClosed = false
 
         self.contentViewController = controller
+        controller.rootView = ResponseView(
+            viewModel: viewModel,
+            onClose: { [weak self] in
+                self?.close()
+            }
+        )
         self.center()
         self.setFrameAutosaveName("ResponseWindow")
     }
@@ -35,7 +41,9 @@ class ResponseWindow: NSWindow {
         option: WritingOption? = nil,
         provider: any AIProvider,
         conversationImages: [Data] = [],
-        baseSystemPrompt: String? = nil
+        baseSystemPrompt: String? = nil,
+        reviewContext: ResponseReviewContext? = nil,
+        responsePresentation: CommandResponsePresentation = .standard
     ) {
         let viewModel = ResponseViewModel(
             content: content,
@@ -43,7 +51,9 @@ class ResponseWindow: NSWindow {
             option: option,
             provider: provider,
             conversationImages: conversationImages,
-            baseSystemPrompt: baseSystemPrompt
+            baseSystemPrompt: baseSystemPrompt,
+            reviewContext: reviewContext,
+            responsePresentation: responsePresentation
         )
 
         self.init(title: title, viewModel: viewModel)

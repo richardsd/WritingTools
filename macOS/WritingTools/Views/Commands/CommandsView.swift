@@ -9,7 +9,12 @@ struct CommandsView: View {
     
     @State private var isAddingNew = false
     @State private var editingCommand: CommandModel?
-    @State private var newCommand = CommandModel(name: "", prompt: "", icon: "text.bubble")
+    @State private var newCommand = CommandModel(
+        name: "",
+        prompt: "",
+        icon: "text.bubble",
+        executionMode: .reviewBeforeApply
+    )
     @State private var showingResetAlert = false
     @State private var selectedTab = 0 // 0 for built-in, 1 for custom
     
@@ -89,11 +94,21 @@ struct CommandsView: View {
                 command: $newCommand,
                 onSave: {
                     commandManager.addCommand(newCommand)
-                    newCommand = CommandModel(name: "", prompt: "", icon: "text.bubble")
+                    newCommand = CommandModel(
+                        name: "",
+                        prompt: "",
+                        icon: "text.bubble",
+                        executionMode: .reviewBeforeApply
+                    )
                     isAddingNew = false
                 },
                 onCancel: {
-                    newCommand = CommandModel(name: "", prompt: "", icon: "text.bubble")
+                    newCommand = CommandModel(
+                        name: "",
+                        prompt: "",
+                        icon: "text.bubble",
+                        executionMode: .reviewBeforeApply
+                    )
                     isAddingNew = false
                 }
             )
@@ -221,8 +236,16 @@ struct CommandRow: View {
                 )
             
             VStack(alignment: .leading, spacing: 4) {
-                Text(command.name)
-                    .font(.headline)
+                HStack(spacing: 6) {
+                    Text(command.name)
+                        .font(.headline)
+
+                    if command.isFavorite {
+                        Image(systemName: "star.fill")
+                            .font(.caption)
+                            .foregroundStyle(.yellow)
+                    }
+                }
                 
                 Text(command.isBuiltIn ? "Built-in" : "Custom")
                     .font(.caption)

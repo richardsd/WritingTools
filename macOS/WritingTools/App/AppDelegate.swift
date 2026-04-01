@@ -81,6 +81,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setupMenuBar()
     }
 
+    @objc private func togglePreviewEditsBeforeApplying() {
+        AppSettings.shared.previewEditsBeforeApplying.toggle()
+        setupMenuBar()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.servicesProvider = self
 
@@ -122,6 +127,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             name: NSNotification.Name("CommandsChanged"),
             object: nil
         )
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(refreshMenuBar),
+            name: .previewEditsBeforeApplyingDidChange,
+            object: nil
+        )
+
+        KeyboardShortcuts.onKeyUp(for: .togglePreviewEditsBeforeApplying) {
+            [weak self] in
+            guard let self, !AppSettings.shared.hotkeysPaused else {
+                return
+            }
+
+            self.togglePreviewEditsBeforeApplying()
+        }
     }
 
     @objc private func setupCommandShortcuts() {
@@ -272,102 +293,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             logger.debug("Restored original clipboard after capturing selection")
 
             // Process the command with the captured data
-            await self.processCommandWithUI(command)
-        }
-    }
-
-    private func processCommandWithUI(_ command: CommandModel) async {
-        if appState.isProcessing {
-            return
-        }
-
-        appState.isProcessing = true
-
-        // Get the appropriate provider for this command (respects per-command overrides)
-        let provider = appState.getProvider(for: command)
-
-        // Show processing HUD for visual feedback
-        WindowManager.shared.showProcessingHUD(
-            commandName: command.name,
-            commandIcon: command.icon,
-            onCancel: { [weak self] in
-                provider.cancel()
-                self?.appState.isProcessing = false
-            }
-        )
-
-        defer {
-            appState.isProcessing = false
-            WindowManager.shared.dismissProcessingHUD()
-        }
-
-        do {
-            var result = try await provider.processText(
-                systemPrompt: AppProfileService.shared.enrichSystemPrompt(command.prompt, for: appState.previousApplication),
-                userPrompt: appState.selectedText,
-                images: appState.selectedImages,
-                streaming: false
-            )
-
-            // Preserve trailing newlines from the original selection
-            // This is important for triple-click selections which include the trailing newline
-            let originalText = appState.selectedText
-            if originalText.hasSuffix("\n") && !result.hasSuffix("\n") {
-                result += "\n"
-                logger.debug("Added trailing newline to match input")
-            }
-
-            // Record to history
-            let capturedApp = appState.previousApplication
-            let matchedProfile = capturedApp.map {
-                AppProfileService.shared.resolveProfile(for: ActiveAppContext(from: $0))
-            } ?? nil
-            await MainActor.run {
-                HistoryManager.shared.record(
-                    commandName: command.name,
-                    commandId: command.id,
-                    inputText: originalText,
-                    outputText: result,
-                    modelName: provider.modelDisplayName.isEmpty ? nil : provider.modelDisplayName,
-                    sourceApp: capturedApp,
-                    matchedProfileName: matchedProfile?.name
-                )
-            }
-
-            await MainActor.run {
-                if command.useResponseWindow {
-                    let window = ResponseWindow(
-                        title: command.name,
-                        content: result,
-                        selectedText: appState.selectedText,
-                        option: nil,
-                        provider: provider
-                    )
-
-                    NSApp.activate(ignoringOtherApps: true)
-                    WindowManager.shared.addResponseWindow(window)
-                    window.makeKeyAndOrderFront(nil)
-                    window.orderFrontRegardless()
-                } else {
-                    if command.preserveFormatting, appState.selectedAttributedText != nil {
-                        appState.replaceSelectedTextPreservingAttributes(with: result)
-                    } else {
-                        appState.replaceSelectedText(with: result)
-                    }
-                }
-            }
-        } catch {
-            logger.error("Error processing command \(command.name): \(error.localizedDescription)")
-
-            // Show error alert
-            await MainActor.run {
-                let alert = NSAlert()
-                alert.messageText = "Command Error"
-                alert.informativeText = "Failed to process '\(command.name)': \(error.localizedDescription)"
-                alert.alertStyle = .warning
-                alert.addButton(withTitle: "OK")
-                alert.runModal()
-            }
+            await self.appState.executeCommand(command)
         }
     }
 
@@ -420,6 +346,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
     }
 
+    @objc private func refreshMenuBar() {
+        setupMenuBar()
+    }
+
     private func setupMenuBar() {
         guard let statusBarItem = self.statusBarItem else {
             logger.error("Failed to create status bar item")
@@ -433,6 +363,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menu.addItem(
             NSMenuItem(title: "About", action: #selector(showAbout), keyEquivalent: "i")
         )
+        let previewItem = NSMenuItem(
+            title: "Preview Edits Before Applying",
+            action: #selector(togglePreviewEditsBeforeApplying),
+            keyEquivalent: ""
+        )
+        previewItem.state =
+            AppSettings.shared.previewEditsBeforeApplying ? .on : .off
+        menu.addItem(previewItem)
         let hotkeyTitle = AppSettings.shared.hotkeysPaused ? "Resume" : "Pause"
         menu.addItem(
             NSMenuItem(title: hotkeyTitle, action: #selector(toggleHotkeys), keyEquivalent: "p")

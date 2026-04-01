@@ -15,8 +15,9 @@ struct CommandEditor: View {
     @State private var name: String
     @State private var prompt: String
     @State private var selectedIcon: String
-    @State private var useResponseWindow: Bool
+    @State private var executionMode: CommandExecutionMode
     @State private var hasShortcut: Bool
+    @State private var isFavorite: Bool
     @State private var showingIconPicker = false
     @State private var isNameDuplicate = false
     @State private var showDuplicateAlert = false
@@ -40,8 +41,9 @@ struct CommandEditor: View {
         _name = State(initialValue: command.wrappedValue.name)
         _prompt = State(initialValue: command.wrappedValue.prompt)
         _selectedIcon = State(initialValue: command.wrappedValue.icon)
-        _useResponseWindow = State(initialValue: command.wrappedValue.useResponseWindow)
+        _executionMode = State(initialValue: command.wrappedValue.executionMode)
         _hasShortcut = State(initialValue: command.wrappedValue.hasShortcut)
+        _isFavorite = State(initialValue: command.wrappedValue.isFavorite)
 
         // Initialize provider override states
         _useCustomProvider = State(initialValue: command.wrappedValue.providerOverride != nil)
@@ -163,8 +165,25 @@ struct CommandEditor: View {
                     Text("Options")
                         .font(.headline)
                         .foregroundStyle(.secondary)
-                    
-                    Toggle("Display response in window", isOn: $useResponseWindow)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Execution Mode")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+
+                        Picker("Execution Mode", selection: $executionMode) {
+                            ForEach(CommandExecutionMode.allCases) { mode in
+                                Text(mode.title).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.menu)
+
+                        Text(executionMode.helpText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Toggle("Favorite this command", isOn: $isFavorite)
 
                     Toggle("Enable keyboard shortcut for this command", isOn: $hasShortcut)
                     
@@ -302,8 +321,9 @@ struct CommandEditor: View {
         updatedCommand.name = name
         updatedCommand.prompt = prompt
         updatedCommand.icon = selectedIcon
-        updatedCommand.useResponseWindow = useResponseWindow
+        updatedCommand.executionMode = executionMode
         updatedCommand.hasShortcut = hasShortcut
+        updatedCommand.isFavorite = isFavorite
 
         // Save provider override settings
         if useCustomProvider {

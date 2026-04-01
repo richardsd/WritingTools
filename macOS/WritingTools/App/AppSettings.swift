@@ -1,6 +1,11 @@
 import Foundation
 import Observation
 
+extension Notification.Name {
+    static let previewEditsBeforeApplyingDidChange =
+        Notification.Name("PreviewEditsBeforeApplyingDidChange")
+}
+
 // A singleton for app-wide settings that wraps UserDefaults access
 @Observable
 @MainActor
@@ -86,6 +91,19 @@ final class AppSettings {
     }
     var hotkeysPaused: Bool {
         didSet { defaults.set(hotkeysPaused, forKey: "hotkeys_paused") }
+    }
+
+    var previewEditsBeforeApplying: Bool {
+        didSet {
+            defaults.set(
+                previewEditsBeforeApplying,
+                forKey: "preview_edits_before_applying"
+            )
+            NotificationCenter.default.post(
+                name: .previewEditsBeforeApplyingDidChange,
+                object: nil
+            )
+        }
     }
     
     var mistralApiKey: String = "" {
@@ -197,7 +215,10 @@ final class AppSettings {
         self.hotKeyCode = defaults.integer(forKey: "hotKey_keyCode")
         self.hotKeyModifiers = defaults.integer(forKey: "hotKey_modifiers")
         self.hotkeysPaused = defaults.bool(forKey: "hotkeys_paused")
-        
+        self.previewEditsBeforeApplying =
+            defaults.object(forKey: "preview_edits_before_applying") as? Bool
+            ?? false
+
         let ollamaImageModeRaw = defaults.string(forKey: "ollama_image_mode") ?? OllamaImageMode.ocr.rawValue
         self.ollamaImageMode = OllamaImageMode(rawValue: ollamaImageModeRaw) ?? .ocr
         

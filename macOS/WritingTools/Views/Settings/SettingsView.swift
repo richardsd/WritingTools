@@ -4,6 +4,8 @@ import AppKit
 
 extension KeyboardShortcuts.Name {
     static let showPopup = Self("showPopup")
+    static let togglePreviewEditsBeforeApplying =
+        Self("togglePreviewEditsBeforeApplying")
     
     static func commandShortcut(for id: UUID) -> Self {
         return Self("command_\(id.uuidString)")

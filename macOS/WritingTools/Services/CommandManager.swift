@@ -9,12 +9,15 @@ final class CommandManager {
     private let saveKey = "unified_commands"
     private let hasInitializedKey = "has_initialized_commands"
     private let deletedDefaultsKey = "deleted_default_commands"
+    private let deletedDefaultKeysKey = "deleted_default_command_keys"
     
     // Track which default command IDs have been deleted
     private var deletedDefaultIds: Set<UUID> = []
+    private var deletedDefaultKeys: Set<BuiltInCommandKey> = []
     
     init() {
         loadDeletedDefaultIds()
+        loadDeletedDefaultKeys()
         loadCommands()
     }
     
@@ -42,6 +45,11 @@ final class CommandManager {
         if command.isBuiltIn {
             deletedDefaultIds.insert(command.id)
             saveDeletedDefaultIds()
+
+            if let builtInKey = command.builtInKey {
+                deletedDefaultKeys.insert(builtInKey)
+                saveDeletedDefaultKeys()
+            }
         }
         
         saveCommands()
@@ -86,7 +94,12 @@ final class CommandManager {
         // Normal load
         if let data = UserDefaults.standard.data(forKey: saveKey),
            let decoded = try? JSONDecoder().decode([CommandModel].self, from: data) {
-            self.commands = decoded
+            let reconciled = reconcileCommands(decoded)
+            self.commands = reconciled
+
+            if reconciled != decoded {
+                saveCommands()
+            }
         } else {
             // Fallback if something went wrong with loading
             initializeDefaultCommands()
@@ -111,13 +124,32 @@ final class CommandManager {
             UserDefaults.standard.set(encoded, forKey: deletedDefaultsKey)
         }
     }
+
+    private func loadDeletedDefaultKeys() {
+        if let data = UserDefaults.standard.data(forKey: deletedDefaultKeysKey),
+           let decoded = try? JSONDecoder().decode(Set<BuiltInCommandKey>.self, from: data) {
+            self.deletedDefaultKeys = decoded
+        }
+    }
+
+    private func saveDeletedDefaultKeys() {
+        if let encoded = try? JSONEncoder().encode(deletedDefaultKeys) {
+            UserDefaults.standard.set(encoded, forKey: deletedDefaultKeysKey)
+        }
+    }
     
     // MARK: - Default Commands
     
     private func initializeDefaultCommands() {
         // Get the default commands and filter out any that are in the deleted list
         var defaultCmds = CommandModel.defaultCommands
-        defaultCmds = defaultCmds.filter { !deletedDefaultIds.contains($0.id) }
+        defaultCmds = defaultCmds.filter { command in
+            guard let builtInKey = command.builtInKey else {
+                return !deletedDefaultIds.contains(command.id)
+            }
+
+            return !deletedDefaultKeys.contains(builtInKey)
+        }
         
         // Set up commands (if any custom commands, they will be added later)
         self.commands = defaultCmds
@@ -140,6 +172,8 @@ final class CommandManager {
         // Clear the deleted defaults tracking
         deletedDefaultIds.removeAll()
         saveDeletedDefaultIds()
+        deletedDefaultKeys.removeAll()
+        saveDeletedDefaultKeys()
         
         // Reset to factory defaults and keep custom commands
         self.commands = defaultCommands + customCommands
@@ -160,7 +194,13 @@ final class CommandManager {
         
         // Get default commands but filter out deleted ones
         var defaultCmds = CommandModel.defaultCommands
-        defaultCmds = defaultCmds.filter { !deletedDefaultIds.contains($0.id) }
+        defaultCmds = defaultCmds.filter { command in
+            guard let builtInKey = command.builtInKey else {
+                return !deletedDefaultIds.contains(command.id)
+            }
+
+            return !deletedDefaultKeys.contains(builtInKey)
+        }
         
         // Set commands to be:
         // 1. Default built-in commands (except deleted ones)
@@ -182,5 +222,43 @@ final class CommandManager {
             name: NSNotification.Name("CommandsChanged"),
             object: nil
         )
+    }
+
+    private func reconcileCommands(
+        _ loadedCommands: [CommandModel]
+    ) -> [CommandModel] {
+        let builtInCommands = loadedCommands.filter(\.isBuiltIn)
+        let customCommands = loadedCommands.filter { !$0.isBuiltIn }
+        let existingBuiltInsByKey: [BuiltInCommandKey: CommandModel] = Dictionary(
+            uniqueKeysWithValues: builtInCommands.compactMap { command in
+                guard let key = command.builtInKey else { return nil }
+                return (key, command)
+            }
+        )
+
+        let backfilledKeys: Set<BuiltInCommandKey> = [.writingCoach]
+        var reconciledBuiltIns: [CommandModel] = []
+
+        for defaultCommand in CommandModel.defaultCommands {
+            guard let builtInKey = defaultCommand.builtInKey else { continue }
+
+            if let existingCommand = existingBuiltInsByKey[builtInKey] {
+                reconciledBuiltIns.append(existingCommand)
+                continue
+            }
+
+            guard backfilledKeys.contains(builtInKey),
+                  !deletedDefaultKeys.contains(builtInKey) else {
+                continue
+            }
+
+            reconciledBuiltIns.append(defaultCommand)
+        }
+
+        let legacyBuiltInsWithoutKeys = builtInCommands.filter {
+            $0.builtInKey == nil
+        }
+
+        return reconciledBuiltIns + legacyBuiltInsWithoutKeys + customCommands
     }
 }

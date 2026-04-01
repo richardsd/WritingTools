@@ -12,6 +12,26 @@ enum PopupSelectionState: Equatable {
     case failed(String?)
 }
 
+struct TextReplacementContext {
+    let previousApplication: NSRunningApplication?
+    let selectedAttributedText: NSAttributedString?
+}
+
+private struct PreparedCommandExecution {
+    let command: CommandModel
+    let provider: any AIProvider
+    let systemPrompt: String
+    let userPrompt: String
+    let originalText: String
+    let images: [Data]
+    let executionMode: CommandExecutionMode
+    let responsePresentation: CommandResponsePresentation
+    let replacementContext: TextReplacementContext
+    let canPreserveFormatting: Bool
+    let sourceApp: NSRunningApplication?
+    let matchedProfileName: String?
+}
+
 @Observable
 @MainActor
 final class AppState {
@@ -443,77 +463,274 @@ final class AppState {
 
     // Process a command (unified method for all command types)
     func processCommand(_ command: CommandModel) {
-        guard !selectedText.isEmpty else { return }
+        Task { @MainActor in
+            await executeCommand(command)
+        }
+    }
+
+    func executeCommand(
+        _ command: CommandModel,
+        closePopup: (() -> Void)? = nil
+    ) async {
+        guard !isProcessing else { return }
+        guard let prepared = prepareCommandExecution(for: command) else { return }
 
         isProcessing = true
 
-        Task {
-            do {
-                let prompt = AppProfileService.shared.enrichSystemPrompt(command.prompt, for: previousApplication)
+        switch prepared.executionMode {
+        case .responseWindow:
+            presentResponseWindow(for: prepared, closePopup: closePopup)
+        case .instantApply, .reviewBeforeApply:
+            await executeInlineCommand(prepared, closePopup: closePopup)
+        }
+    }
 
-                // Get the appropriate provider for this command (respects per-command overrides)
-                let provider = getProvider(for: command)
+    private func prepareCommandExecution(
+        for command: CommandModel
+    ) -> PreparedCommandExecution? {
+        let trimmedText = selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if command.requiresSelectedText {
+            guard !trimmedText.isEmpty else { return nil }
+        } else if selectedText.isEmpty && selectedImages.isEmpty {
+            return nil
+        }
 
-                var result = try await provider.processText(
-                    systemPrompt: prompt,
-                    userPrompt: selectedText,
-                    images: [],
-                    streaming: false
-                )
+        let prompt = AppProfileService.shared.enrichSystemPrompt(
+            command.prompt,
+            for: previousApplication
+        )
+        let provider = getProvider(for: command)
+        let replacementContext = makeReplacementContext(
+            preserveFormatting: command.preserveFormatting
+        )
+        let canPreserveFormatting =
+            command.preserveFormatting
+            && replacementContext.selectedAttributedText != nil
+        let capturedApp = previousApplication
+        let matchedProfile = capturedApp.map {
+            AppProfileService.shared.resolveProfile(for: ActiveAppContext(from: $0))
+        } ?? nil
 
-                // Preserve trailing newlines from the original selection
-                // This is important for triple-click selections which include the trailing newline
-                if selectedText.hasSuffix("\n") && !result.hasSuffix("\n") {
-                    result += "\n"
-                    logger.debug("Added trailing newline to match input")
-                }
+        return PreparedCommandExecution(
+            command: command,
+            provider: provider,
+            systemPrompt: prompt,
+            userPrompt: selectedText,
+            originalText: selectedText,
+            images: command.requiresSelectedText ? [] : selectedImages,
+            executionMode: resolvedExecutionMode(for: command),
+            responsePresentation: command.responsePresentation,
+            replacementContext: replacementContext,
+            canPreserveFormatting: canPreserveFormatting,
+            sourceApp: capturedApp,
+            matchedProfileName: matchedProfile?.name
+        )
+    }
 
-                // Record to history
-                let capturedInput = selectedText
-                let capturedApp = previousApplication
-                let matchedProfile = capturedApp.map {
-                    AppProfileService.shared.resolveProfile(for: ActiveAppContext(from: $0))
-                } ?? nil
-                HistoryManager.shared.record(
-                    commandName: command.name,
-                    commandId: command.id,
-                    inputText: capturedInput,
-                    outputText: result,
-                    modelName: provider.modelDisplayName.isEmpty ? nil : provider.modelDisplayName,
-                    sourceApp: capturedApp,
-                    matchedProfileName: matchedProfile?.name
-                )
+    private func executeInlineCommand(
+        _ prepared: PreparedCommandExecution,
+        closePopup: (() -> Void)?
+    ) async {
+        closePopup?()
 
-                if command.useResponseWindow {
-                    let window = ResponseWindow(
-                        title: "\(command.name) Result",
-                        content: result,
-                        selectedText: selectedText,
-                        option: nil,
-                        provider: provider
-                    )
-
-                    WindowManager.shared.addResponseWindow(window)
-                    window.makeKeyAndOrderFront(nil)
-                    window.orderFrontRegardless()
-                } else {
-                    if command.preserveFormatting, selectedAttributedText != nil {
-                        replaceSelectedTextPreservingAttributes(with: result)
-                    } else {
-                        replaceSelectedText(with: result)
-                    }
-                }
-            } catch {
-                logger.error("Error processing command: \(error.localizedDescription)")
+        WindowManager.shared.showProcessingHUD(
+            commandName: prepared.command.name,
+            commandIcon: prepared.command.icon,
+            onCancel: { [weak self] in
+                prepared.provider.cancel()
+                self?.isProcessing = false
             }
+        )
 
+        defer {
+            WindowManager.shared.dismissProcessingHUD()
             isProcessing = false
         }
+
+        do {
+            var result = try await prepared.provider.processText(
+                systemPrompt: prepared.systemPrompt,
+                userPrompt: prepared.userPrompt,
+                images: prepared.images,
+                streaming: false
+            )
+
+            if prepared.originalText.hasSuffix("\n") && !result.hasSuffix("\n") {
+                result += "\n"
+                logger.debug("Added trailing newline to match input")
+            }
+
+            recordHistory(for: prepared, outputText: result)
+
+            if prepared.executionMode == .reviewBeforeApply {
+                let reviewContext = makeReviewContext(for: prepared)
+                let window = ResponseWindow(
+                    title: "\(prepared.command.name) Review",
+                    content: result,
+                    selectedText: prepared.originalText,
+                    option: nil,
+                    provider: prepared.provider,
+                    conversationImages: prepared.images,
+                    baseSystemPrompt: prepared.systemPrompt,
+                    reviewContext: reviewContext,
+                    responsePresentation: prepared.responsePresentation
+                )
+
+                NSApp.activate(ignoringOtherApps: true)
+                WindowManager.shared.addResponseWindow(window)
+                window.makeKeyAndOrderFront(nil)
+                window.orderFrontRegardless()
+            } else if prepared.canPreserveFormatting {
+                applyReviewedText(
+                    result,
+                    using: prepared.replacementContext,
+                    preserveFormatting: true
+                )
+            } else {
+                applyReviewedText(
+                    result,
+                    using: prepared.replacementContext,
+                    preserveFormatting: false
+                )
+            }
+        } catch {
+            logger.error("Error processing command \(prepared.command.name): \(error.localizedDescription)")
+            let alert = NSAlert()
+            alert.messageText = "Command Error"
+            alert.informativeText = "Failed to process '\(prepared.command.name)': \(error.localizedDescription)"
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        }
+    }
+
+    private func presentResponseWindow(
+        for prepared: PreparedCommandExecution,
+        closePopup: (() -> Void)?
+    ) {
+        let reviewContext = makeReviewContext(for: prepared)
+        let viewModel = ResponseViewModel(
+            initialMessages: [],
+            selectedText: prepared.originalText,
+            option: nil,
+            provider: prepared.provider,
+            conversationImages: prepared.images,
+            baseSystemPrompt: prepared.systemPrompt,
+            reviewContext: reviewContext,
+            responsePresentation: prepared.responsePresentation
+        )
+
+        let window = ResponseWindow(title: prepared.command.name, viewModel: viewModel)
+        NSApp.activate(ignoringOtherApps: true)
+        WindowManager.shared.addResponseWindow(window)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+
+        closePopup?()
+
+        Task { @MainActor in
+            await Task.yield()
+            viewModel.startInitialResponse(
+                systemPrompt: prepared.systemPrompt,
+                userPrompt: prepared.userPrompt,
+                images: prepared.images,
+                onSuccess: { [weak self] rawContent, coachResponse in
+                    guard let self else { return }
+                    let outputText = coachResponse?.trimmedSuggestedRevision
+                        ?? coachResponse?.renderedText
+                        ?? rawContent.normalizedForMarkdown()
+                    self.recordHistory(for: prepared, outputText: outputText)
+                },
+                onFinish: { [weak self] in
+                    self?.isProcessing = false
+                }
+            )
+        }
+    }
+
+    private func makeReviewContext(
+        for prepared: PreparedCommandExecution
+    ) -> ResponseReviewContext? {
+        let shouldAttachReviewContext =
+            prepared.executionMode == .reviewBeforeApply
+            || prepared.responsePresentation == .writingCoach
+        guard shouldAttachReviewContext, !prepared.originalText.isEmpty else {
+            return nil
+        }
+
+        return ResponseReviewContext(
+            commandName: prepared.command.name,
+            originalText: prepared.originalText,
+            canPreserveFormatting: prepared.canPreserveFormatting,
+            applyAction: { [replacementContext = prepared.replacementContext,
+                            canPreserveFormatting = prepared.canPreserveFormatting] acceptedText in
+                AppState.shared.applyReviewedText(
+                    acceptedText,
+                    using: replacementContext,
+                    preserveFormatting: canPreserveFormatting
+                )
+            }
+        )
+    }
+
+    private func recordHistory(
+        for prepared: PreparedCommandExecution,
+        outputText: String
+    ) {
+        HistoryManager.shared.record(
+            commandName: prepared.command.name,
+            commandId: prepared.command.id,
+            inputText: prepared.originalText,
+            outputText: outputText,
+            modelName: prepared.provider.modelDisplayName.isEmpty
+                ? nil
+                : prepared.provider.modelDisplayName,
+            sourceApp: prepared.sourceApp,
+            matchedProfileName: prepared.matchedProfileName
+        )
+    }
+
+    func resolvedExecutionMode(for command: CommandModel) -> CommandExecutionMode {
+        command.executionMode.resolved(
+            previewEditsBeforeApplying: AppSettings.shared.previewEditsBeforeApplying
+        )
     }
 
     // MARK: - Fixed: Proper Window Activation Verification
 
     func replaceSelectedText(with newText: String) {
+        replaceText(
+            with: newText,
+            context: makeReplacementContext(preserveFormatting: false)
+        )
+    }
+
+    func applyReviewedText(
+        _ newText: String,
+        using context: TextReplacementContext,
+        preserveFormatting: Bool
+    ) {
+        if preserveFormatting, context.selectedAttributedText != nil {
+            replaceTextPreservingAttributes(
+                with: newText,
+                context: context
+            )
+        } else {
+            replaceText(with: newText, context: context)
+        }
+    }
+
+    func makeReplacementContext(preserveFormatting: Bool) -> TextReplacementContext {
+        TextReplacementContext(
+            previousApplication: previousApplication,
+            selectedAttributedText: preserveFormatting ? selectedAttributedText : nil
+        )
+    }
+
+    private func replaceText(
+        with newText: String,
+        context: TextReplacementContext
+    ) {
         // Take a snapshot of the current clipboard BEFORE we overwrite it
         let clipboardSnapshot = NSPasteboard.general.createSnapshot()
 
@@ -523,7 +740,7 @@ final class AppState {
         pasteboard.writeObjects([newText as NSString])
 
         // Reactivate previous application
-        if let previousApp = previousApplication {
+        if let previousApp = context.previousApplication {
             previousApp.activate()
 
             // Wait for window activation, paste, then restore clipboard
@@ -561,8 +778,18 @@ final class AppState {
     }
 
     func replaceSelectedTextPreservingAttributes(with corrected: String) {
-        guard let original = selectedAttributedText else {
-            replaceSelectedText(with: corrected)
+        replaceTextPreservingAttributes(
+            with: corrected,
+            context: makeReplacementContext(preserveFormatting: true)
+        )
+    }
+
+    private func replaceTextPreservingAttributes(
+        with corrected: String,
+        context: TextReplacementContext
+    ) {
+        guard let original = context.selectedAttributedText else {
+            replaceText(with: corrected, context: context)
             return
         }
 
@@ -604,7 +831,7 @@ final class AppState {
 
         pb.writeObjects([item])
 
-        if let previous = previousApplication {
+        if let previous = context.previousApplication {
             previous.activate()
             activateWindowAndPaste(for: previous, clipboardSnapshot: clipboardSnapshot)
         }

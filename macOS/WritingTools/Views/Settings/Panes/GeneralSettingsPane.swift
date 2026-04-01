@@ -45,6 +45,42 @@ struct GeneralSettingsPane<SaveButton: View>: View {
                 }
             }
 
+            GroupBox("Review Screen") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Choose whether review-capable commands show the preview screen before applying changes.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+
+                    Toggle(isOn: $settings.previewEditsBeforeApplying) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Preview edits before applying")
+                            Text("Commands using Review Before Apply will paste instantly when this is off")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .toggleStyle(.checkbox)
+                    .onChange(of: settings.previewEditsBeforeApplying) { _, _ in
+                        needsSaving = true
+                    }
+                    .help("Turn the review screen on or off for commands configured to use Review Before Apply.")
+
+                    HStack(alignment: .center, spacing: 12) {
+                        Text("Toggle preview:")
+                            .frame(width: 180, alignment: .leading)
+                            .foregroundStyle(.primary)
+                        KeyboardShortcuts.Recorder(
+                            for: .togglePreviewEditsBeforeApplying,
+                            onChange: { _ in
+                                needsSaving = true
+                            }
+                        )
+                        .help("Assign a shortcut to turn the review screen on or off from anywhere.")
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+
             GroupBox("Commands") {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Manage your writing tools and assign keyboard shortcuts.")

@@ -1,15 +1,76 @@
 import Foundation
 import SwiftUI
 
+enum CommandExecutionMode: String, Codable, CaseIterable, Identifiable {
+    case instantApply = "instant_apply"
+    case reviewBeforeApply = "review_before_apply"
+    case responseWindow = "response_window"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .instantApply:
+            return "Apply Instantly"
+        case .reviewBeforeApply:
+            return "Review Before Apply (App Setting)"
+        case .responseWindow:
+            return "Open in Response Window"
+        }
+    }
+
+    var helpText: String {
+        switch self {
+        case .instantApply:
+            return "Immediately paste the result back into the source app."
+        case .reviewBeforeApply:
+            return "Uses the app-wide 'Preview edits before applying' setting to decide whether to open the review window before pasting."
+        case .responseWindow:
+            return "Open the result in a separate response window without pasting it back."
+        }
+    }
+
+    func resolved(
+        previewEditsBeforeApplying: Bool
+    ) -> CommandExecutionMode {
+        guard self == .reviewBeforeApply, !previewEditsBeforeApplying else {
+            return self
+        }
+
+        return .instantApply
+    }
+}
+
+enum CommandResponsePresentation: String, Codable, Equatable {
+    case standard
+    case writingCoach = "writing_coach"
+}
+
+enum BuiltInCommandKey: String, Codable, Equatable, Hashable {
+    case proofread
+    case writingCoach = "writing_coach"
+    case rewrite
+    case friendly
+    case professional
+    case concise
+    case summary
+    case keyPoints = "key_points"
+    case table
+}
+
 struct CommandModel: Codable, Identifiable, Equatable {
     let id: UUID
     var name: String
     var prompt: String
     var icon: String
-    var useResponseWindow: Bool
+    var executionMode: CommandExecutionMode
+    var responsePresentation: CommandResponsePresentation
+    var builtInKey: BuiltInCommandKey?
     var isBuiltIn: Bool
     var hasShortcut: Bool
     var preserveFormatting: Bool
+    var isFavorite: Bool
+    var requiresSelectedText: Bool
 
     // MARK: - Per-Command AI Provider Configuration
 
@@ -31,9 +92,14 @@ struct CommandModel: Codable, Identifiable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case id, name, prompt, icon
         case useResponseWindow
+        case executionMode
+        case responsePresentation
+        case builtInKey
         case isBuiltIn
         case hasShortcut
         case preserveFormatting
+        case isFavorite
+        case requiresSelectedText
         case providerOverride
         case modelOverride
         case customProviderBaseURL
@@ -49,13 +115,41 @@ struct CommandModel: Codable, Identifiable, Equatable {
         name = try c.decode(String.self, forKey: .name)
         prompt = try c.decode(String.self, forKey: .prompt)
         icon = try c.decode(String.self, forKey: .icon)
-        useResponseWindow = try c.decodeIfPresent(Bool.self, forKey: .useResponseWindow) ?? false
         isBuiltIn = try c.decodeIfPresent(Bool.self, forKey: .isBuiltIn) ?? false
         hasShortcut = try c.decodeIfPresent(Bool.self, forKey: .hasShortcut) ?? false
         preserveFormatting = try c.decodeIfPresent(Bool.self,
                                                    forKey: .preserveFormatting) ?? false
+        isFavorite = try c.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false
+
+        let legacyUseResponseWindow =
+            try c.decodeIfPresent(Bool.self, forKey: .useResponseWindow) ?? false
+        executionMode =
+            try c.decodeIfPresent(CommandExecutionMode.self, forKey: .executionMode)
+            ?? Self.legacyExecutionMode(
+                useResponseWindow: legacyUseResponseWindow,
+                isBuiltIn: isBuiltIn
+            )
+        responsePresentation =
+            try c.decodeIfPresent(
+                CommandResponsePresentation.self,
+                forKey: .responsePresentation
+            ) ?? .standard
+        builtInKey =
+            try c.decodeIfPresent(
+                BuiltInCommandKey.self,
+                forKey: .builtInKey
+            )
+            ?? Self.inferBuiltInKey(
+                name: name,
+                prompt: prompt,
+                icon: icon,
+                isBuiltIn: isBuiltIn
+            )
         providerOverride = try c.decodeIfPresent(String.self, forKey: .providerOverride)
         modelOverride = try c.decodeIfPresent(String.self, forKey: .modelOverride)
+        requiresSelectedText =
+            try c.decodeIfPresent(Bool.self, forKey: .requiresSelectedText)
+            ?? false
         customProviderBaseURL = try c.decodeIfPresent(String.self, forKey: .customProviderBaseURL)
         customProviderApiKey = try c.decodeIfPresent(String.self, forKey: .customProviderApiKey)
         customProviderModel = try c.decodeIfPresent(String.self, forKey: .customProviderModel)
@@ -69,11 +163,23 @@ struct CommandModel: Codable, Identifiable, Equatable {
         try c.encode(name, forKey: .name)
         try c.encode(prompt, forKey: .prompt)
         try c.encode(icon, forKey: .icon)
-        if useResponseWindow { try c.encode(useResponseWindow, forKey: .useResponseWindow) }
+        try c.encode(executionMode, forKey: .executionMode)
+        if responsePresentation != .standard {
+            try c.encode(responsePresentation, forKey: .responsePresentation)
+        }
+        if let builtInKey {
+            try c.encode(builtInKey, forKey: .builtInKey)
+        }
         if isBuiltIn { try c.encode(isBuiltIn, forKey: .isBuiltIn) }
         if hasShortcut { try c.encode(hasShortcut, forKey: .hasShortcut) }
         if preserveFormatting {
             try c.encode(preserveFormatting, forKey: .preserveFormatting)
+        }
+        if isFavorite {
+            try c.encode(isFavorite, forKey: .isFavorite)
+        }
+        if requiresSelectedText {
+            try c.encode(requiresSelectedText, forKey: .requiresSelectedText)
         }
         if let providerOverride = providerOverride {
             try c.encode(providerOverride, forKey: .providerOverride)
@@ -99,9 +205,14 @@ struct CommandModel: Codable, Identifiable, Equatable {
          prompt: String,
          icon: String,
          useResponseWindow: Bool = false,
+         executionMode: CommandExecutionMode? = nil,
+         responsePresentation: CommandResponsePresentation = .standard,
+         builtInKey: BuiltInCommandKey? = nil,
          isBuiltIn: Bool = false,
          hasShortcut: Bool = false,
          preserveFormatting: Bool = false,
+         isFavorite: Bool = false,
+         requiresSelectedText: Bool = false,
          providerOverride: String? = nil,
          modelOverride: String? = nil,
          customProviderBaseURL: String? = nil,
@@ -111,15 +222,140 @@ struct CommandModel: Codable, Identifiable, Equatable {
         self.name = name
         self.prompt = prompt
         self.icon = icon
-        self.useResponseWindow = useResponseWindow
+        self.executionMode = executionMode
+            ?? Self.defaultExecutionMode(
+                useResponseWindow: useResponseWindow,
+                isBuiltIn: isBuiltIn
+            )
+        self.responsePresentation = responsePresentation
+        self.builtInKey = builtInKey
         self.isBuiltIn = isBuiltIn
         self.hasShortcut = hasShortcut
         self.preserveFormatting = preserveFormatting
+        self.isFavorite = isFavorite
+        self.requiresSelectedText = requiresSelectedText
         self.providerOverride = providerOverride
         self.modelOverride = modelOverride
         self.customProviderBaseURL = customProviderBaseURL
         self.customProviderApiKey = customProviderApiKey
         self.customProviderModel = customProviderModel
+    }
+
+    var useResponseWindow: Bool {
+        get { executionMode == .responseWindow }
+        set {
+            executionMode = newValue ? .responseWindow : .instantApply
+        }
+    }
+
+    private static func defaultExecutionMode(
+        useResponseWindow: Bool,
+        isBuiltIn: Bool
+    ) -> CommandExecutionMode {
+        if useResponseWindow {
+            return .responseWindow
+        }
+
+        return isBuiltIn ? .reviewBeforeApply : .instantApply
+    }
+
+    private static func legacyExecutionMode(
+        useResponseWindow: Bool,
+        isBuiltIn: Bool
+    ) -> CommandExecutionMode {
+        defaultExecutionMode(
+            useResponseWindow: useResponseWindow,
+            isBuiltIn: isBuiltIn
+        )
+    }
+
+    private static func inferBuiltInKey(
+        name: String,
+        prompt: String,
+        icon: String,
+        isBuiltIn: Bool
+    ) -> BuiltInCommandKey? {
+        guard isBuiltIn else { return nil }
+
+        if prompt.contains("\"role\": \"proofreading assistant\"")
+            || icon == "magnifyingglass"
+        {
+            return .proofread
+        }
+
+        if prompt.contains("You are Writing Coach")
+            || icon == "graduationcap"
+        {
+            return .writingCoach
+        }
+
+        if prompt.contains("\"role\": \"rewriting assistant\"")
+            || icon == "arrow.triangle.2.circlepath"
+        {
+            return .rewrite
+        }
+
+        if prompt.contains("\"role\": \"tone adjustment assistant\"")
+            || icon == "face.smiling"
+        {
+            return .friendly
+        }
+
+        if prompt.contains("\"role\": \"professional tone assistant\"")
+            || icon == "briefcase"
+        {
+            return .professional
+        }
+
+        if prompt.contains("\"role\": \"text condensing assistant\"")
+            || icon == "scissors"
+        {
+            return .concise
+        }
+
+        if prompt.contains("\"role\": \"summarization assistant\"")
+            || icon == "doc.text"
+        {
+            return .summary
+        }
+
+        if prompt.contains("\"role\": \"key points extraction assistant\"")
+            || icon == "list.bullet"
+        {
+            return .keyPoints
+        }
+
+        if prompt.contains("\"role\": \"table conversion assistant\"")
+            || icon == "tablecells"
+        {
+            return .table
+        }
+
+        let normalizedName = name
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        switch normalizedName {
+        case "proofread":
+            return .proofread
+        case "writing coach":
+            return .writingCoach
+        case "rewrite":
+            return .rewrite
+        case "friendly":
+            return .friendly
+        case "professional":
+            return .professional
+        case "concise":
+            return .concise
+        case "summary":
+            return .summary
+        case "key points":
+            return .keyPoints
+        case "table":
+            return .table
+        default:
+            return nil
+        }
     }
 
     // Helper to create from WritingOption for migration
@@ -151,6 +387,7 @@ struct CommandModel: Codable, Identifiable, Equatable {
     static var defaultCommands: [CommandModel] {
         return [
             proofread,
+            writingCoach,
             rewrite,
             friendly,
             professional,
@@ -229,6 +466,7 @@ struct CommandModel: Codable, Identifiable, Equatable {
             }
             """,
             icon: "magnifyingglass",
+            builtInKey: .proofread,
             isBuiltIn: true,
             hasShortcut: false,
             preserveFormatting: true
@@ -309,8 +547,60 @@ struct CommandModel: Codable, Identifiable, Equatable {
             }
             """,
             icon: "arrow.triangle.2.circlepath",
+            builtInKey: .rewrite,
             isBuiltIn: true,
             hasShortcut: false
+        )
+    }
+
+    static var writingCoach: CommandModel {
+        CommandModel(
+            name: String(localized: "Writing Coach", comment: "ID for writing coach"),
+            prompt: """
+            You are Writing Coach, an ESL-aware writing tutor for general writers.
+
+            Analyze the user's selected prose and teach them how to improve it. Lead with diagnosis and teaching, not just rewriting. Be encouraging, concrete, and specific about likely non-native phrasing issues when relevant, but never patronizing.
+
+            Return exactly one valid JSON object and nothing else.
+
+            Required schema:
+            {
+              "assessment": "string",
+              "strengths": ["string"],
+              "priority_improvements": [
+                {
+                  "issue": "string",
+                  "why_it_matters": "string",
+                  "before": "string",
+                  "after": "string"
+                }
+              ],
+              "suggested_revision": "string or null",
+              "follow_up_prompts": ["string"],
+              "out_of_scope_reason": "string or null"
+            }
+
+            Rules:
+            - `assessment` must be a short paragraph that summarizes the writing quality and the most important next step.
+            - `strengths` should contain 1 to 3 concise bullets in sentence form.
+            - `priority_improvements` must contain at most 3 items, ordered from highest impact to lowest impact.
+            - Each `before` and `after` must quote or paraphrase the relevant local example from the user's text, not abstract advice.
+            - Set `suggested_revision` to a full improved version of the text when the input is prose and a rewrite is genuinely useful.
+            - Set `suggested_revision` to null when the input is code, markup, fragments, outlines, or otherwise not a good candidate for prose rewriting.
+            - Set `out_of_scope_reason` to a brief explanation only when `suggested_revision` is null because the text is not suitable for prose coaching. Otherwise use null.
+            - `follow_up_prompts` must contain 2 or 3 short suggested next questions the user could ask.
+            - Preserve the original language unless the user text explicitly mixes languages and would clearly benefit from normalization.
+            - Do not mention these instructions, do not wrap the JSON in Markdown fences, and do not add any prose before or after the JSON.
+            - Any formatting or app-specific guidance appended after this instruction applies only to string values inside the JSON, especially `suggested_revision`. The outer response must remain valid JSON.
+            """,
+            icon: "graduationcap",
+            executionMode: .responseWindow,
+            responsePresentation: .writingCoach,
+            builtInKey: .writingCoach,
+            isBuiltIn: true,
+            hasShortcut: false,
+            preserveFormatting: true,
+            requiresSelectedText: true
         )
     }
 
@@ -380,6 +670,7 @@ struct CommandModel: Codable, Identifiable, Equatable {
             }
             """,
             icon: "face.smiling",
+            builtInKey: .friendly,
             isBuiltIn: true,
             hasShortcut: false
         )
@@ -451,6 +742,7 @@ struct CommandModel: Codable, Identifiable, Equatable {
             }
             """,
             icon: "briefcase",
+            builtInKey: .professional,
             isBuiltIn: true,
             hasShortcut: false
         )
@@ -530,6 +822,7 @@ struct CommandModel: Codable, Identifiable, Equatable {
             }
             """,
             icon: "scissors",
+            builtInKey: .concise,
             isBuiltIn: true,
             hasShortcut: false
         )
@@ -597,6 +890,7 @@ struct CommandModel: Codable, Identifiable, Equatable {
             }
             """,
             icon: "doc.text",
+            builtInKey: .summary,
             isBuiltIn: true,
             hasShortcut: false
         )
@@ -667,6 +961,7 @@ struct CommandModel: Codable, Identifiable, Equatable {
             }
             """,
             icon: "list.bullet",
+            builtInKey: .keyPoints,
             isBuiltIn: true,
             hasShortcut: false
         )
@@ -735,6 +1030,7 @@ struct CommandModel: Codable, Identifiable, Equatable {
             }
             """,
             icon: "tablecells",
+            builtInKey: .table,
             isBuiltIn: true,
             hasShortcut: false
         )

@@ -7,7 +7,7 @@ import Observation
 extension String {
     /// Normalizes LaTeX delimiters to markdown-friendly versions
     /// Converts \[...\] to $$...$$ and \(...\) to $...$
-    fileprivate func normalizedLatex() -> String {
+    func normalizedLatex() -> String {
         var result = self
 
         // Convert \[...\] to $$...$$
@@ -23,7 +23,7 @@ extension String {
 
     /// Strips outer code block wrapper if the entire response is wrapped in one.
     /// Some AI models wrap their entire response in ```markdown or ``` fences.
-    fileprivate func strippingOuterCodeBlock() -> String {
+    func strippingOuterCodeBlock() -> String {
         let trimmed = self.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Pattern to match content wrapped in a single outer code block
@@ -44,7 +44,7 @@ extension String {
     }
 
     /// Applies all markdown normalizations for AI responses.
-    fileprivate func normalizedForMarkdown() -> String {
+    func normalizedForMarkdown() -> String {
         self
             .strippingOuterCodeBlock()
             .normalizedLatex()
@@ -65,20 +65,37 @@ struct ChatMessage: Identifiable, Equatable, Sendable {
     var content: String
     let timestamp: Date
     var status: ChatMessageStatus
+    var coachResponse: WritingCoachResponse?
 
     init(
         id: UUID = UUID(),
         role: String,
         content: String,
         timestamp: Date = Date(),
-        status: ChatMessageStatus = .complete
+        status: ChatMessageStatus = .complete,
+        coachResponse: WritingCoachResponse? = nil
     ) {
         self.id = id
         self.role = role
         self.content = content
         self.timestamp = timestamp
         self.status = status
+        self.coachResponse = coachResponse
     }
+}
+
+struct ResponseReviewContext {
+    let commandName: String
+    let originalText: String
+    let canPreserveFormatting: Bool
+    let applyAction: @MainActor (String) -> Void
+}
+
+private enum ReviewDisplayMode: String, CaseIterable, Identifiable {
+    case preview = "Preview"
+    case diff = "Diff"
+
+    var id: String { rawValue }
 }
 
 // MARK: - Response View
@@ -87,9 +104,15 @@ struct ResponseView: View {
     @State private var viewModel: ResponseViewModel
     @Bindable private var settings = AppSettings.shared
     @State private var inputText: String = ""
+    @State private var reviewDisplayMode: ReviewDisplayMode = .preview
+    let onClose: () -> Void
 
-    init(viewModel: ResponseViewModel) {
+    init(
+        viewModel: ResponseViewModel,
+        onClose: @escaping () -> Void = {}
+    ) {
         self._viewModel = State(initialValue: viewModel)
+        self.onClose = onClose
     }
 
     init(
@@ -97,29 +120,67 @@ struct ResponseView: View {
         selectedText: String,
         option: WritingOption? = nil,
         provider: any AIProvider,
-        conversationImages: [Data] = []
+        conversationImages: [Data] = [],
+        reviewContext: ResponseReviewContext? = nil,
+        responsePresentation: CommandResponsePresentation = .standard,
+        onClose: @escaping () -> Void = {}
     ) {
         self._viewModel = State(initialValue: ResponseViewModel(
             content: content,
             selectedText: selectedText,
             option: option,
             provider: provider,
-            conversationImages: conversationImages
+            conversationImages: conversationImages,
+            reviewContext: reviewContext,
+            responsePresentation: responsePresentation
         ))
+        self.onClose = onClose
     }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 16) {
-                Button(action: { viewModel.copyContent() }) {
-                    Label(
-                        viewModel.showCopyConfirmation ? "Copied!" : "Copy All",
-                        systemImage: viewModel.showCopyConfirmation ? "checkmark" : "doc.on.doc"
-                    )
-                    .frame(minWidth: 80)
+                if viewModel.showsReviewControls {
+                    Button(action: applyReviewedText) {
+                        Label("Accept", systemImage: "checkmark")
+                            .frame(minWidth: 78)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!viewModel.canApplyReviewedResult)
+
+                    Button(action: { viewModel.retryInitialResponse() }) {
+                        Label("Retry", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(viewModel.isRequestInFlight)
+
+                    Button(action: onClose) {
+                        Label("Cancel", systemImage: "xmark")
+                    }
+                    .buttonStyle(.bordered)
                 }
-                .buttonStyle(.borderedProminent)
-                .animation(.easeInOut, value: viewModel.showCopyConfirmation)
+
+                if viewModel.showsReviewControls {
+                    Button(action: { viewModel.copyContent() }) {
+                        Label(
+                            viewModel.showCopyConfirmation ? "Copied!" : "Copy All",
+                            systemImage: viewModel.showCopyConfirmation ? "checkmark" : "doc.on.doc"
+                        )
+                        .frame(minWidth: 80)
+                    }
+                    .buttonStyle(.bordered)
+                    .animation(.easeInOut, value: viewModel.showCopyConfirmation)
+                } else {
+                    Button(action: { viewModel.copyContent() }) {
+                        Label(
+                            viewModel.showCopyConfirmation ? "Copied!" : "Copy All",
+                            systemImage: viewModel.showCopyConfirmation ? "checkmark" : "doc.on.doc"
+                        )
+                        .frame(minWidth: 80)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .animation(.easeInOut, value: viewModel.showCopyConfirmation)
+                }
 
                 Spacer()
 
@@ -153,11 +214,30 @@ struct ResponseView: View {
             .padding()
             .background(Color.clear)
 
+            if let reviewContext = viewModel.reviewContext, viewModel.shouldShowReviewPanel {
+                ReviewPanel(
+                    context: reviewContext,
+                    candidateText: viewModel.currentReviewText,
+                    isPending: viewModel.isRequestInFlight,
+                    displayMode: $reviewDisplayMode,
+                    fontSize: viewModel.fontSize
+                )
+                .padding(.horizontal)
+                .padding(.bottom, 8)
+            }
+
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 16) {
                         ForEach(viewModel.messages) { message in
-                            ChatMessageView(message: message, fontSize: viewModel.fontSize)
+                            ChatMessageView(
+                                message: message,
+                                fontSize: viewModel.fontSize,
+                                responsePresentation: viewModel.responsePresentation,
+                                onSuggestedPromptTap: viewModel.canSendFollowUps
+                                    ? sendSuggestedPrompt
+                                    : nil
+                            )
                                 .id(message.id)
                                 .frame(
                                     maxWidth: .infinity,
@@ -204,6 +284,185 @@ struct ResponseView: View {
         inputText = ""
         viewModel.processFollowUpQuestion(question)
     }
+
+    private func sendSuggestedPrompt(_ prompt: String) {
+        guard viewModel.canSendFollowUps else { return }
+        inputText = ""
+        viewModel.processFollowUpQuestion(prompt)
+    }
+
+    private func applyReviewedText() {
+        guard viewModel.applyReviewedResult() else { return }
+        onClose()
+    }
+}
+
+private struct ReviewPanel: View {
+    let context: ResponseReviewContext
+    let candidateText: String
+    let isPending: Bool
+    @Binding var displayMode: ReviewDisplayMode
+    let fontSize: CGFloat
+
+    private var formattingSummary: String {
+        context.canPreserveFormatting
+            ? "Will preserve rich-text formatting when applied."
+            : "Will paste back as plain text."
+    }
+
+    private var safeCandidateText: String {
+        let trimmed = candidateText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "No response yet." : candidateText
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("\(context.commandName) Review")
+                        .font(.headline)
+                    Text(formattingSummary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Picker("Display", selection: $displayMode) {
+                    ForEach(ReviewDisplayMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 170)
+            }
+
+            if isPending {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Regenerating response…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if displayMode == .preview {
+                HStack(alignment: .top, spacing: 12) {
+                    ReviewTextBox(
+                        title: "Original",
+                        text: context.originalText,
+                        fontSize: fontSize
+                    )
+                    ReviewTextBox(
+                        title: "Suggested",
+                        text: safeCandidateText,
+                        fontSize: fontSize
+                    )
+                }
+            } else {
+                GroupBox("Diff") {
+                    ScrollView {
+                        Text(buildDiff())
+                            .font(.system(size: fontSize))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(4)
+                    }
+                    .frame(minHeight: 120, maxHeight: 220)
+                }
+            }
+        }
+        .padding(14)
+        .background(Color(.controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private func buildDiff() -> AttributedString {
+        let inputWords = context.originalText.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+        let outputWords = candidateText.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+
+        let diff = outputWords.difference(from: inputWords)
+
+        var removedInputIndices = Set<Int>()
+        var insertedOutputIndices = Set<Int>()
+        for change in diff {
+            switch change {
+            case .remove(let offset, _, _):
+                removedInputIndices.insert(offset)
+            case .insert(let offset, _, _):
+                insertedOutputIndices.insert(offset)
+            }
+        }
+
+        enum Span {
+            case unchanged(String)
+            case removed(String)
+            case inserted(String)
+        }
+
+        var spans: [Span] = []
+        var inputIndex = 0
+        var outputIndex = 0
+
+        while inputIndex < inputWords.count || outputIndex < outputWords.count {
+            if inputIndex < inputWords.count, removedInputIndices.contains(inputIndex) {
+                spans.append(.removed(inputWords[inputIndex]))
+                inputIndex += 1
+            } else if outputIndex < outputWords.count, insertedOutputIndices.contains(outputIndex) {
+                spans.append(.inserted(outputWords[outputIndex]))
+                outputIndex += 1
+            } else {
+                if inputIndex < inputWords.count {
+                    spans.append(.unchanged(inputWords[inputIndex]))
+                }
+                inputIndex += 1
+                outputIndex += 1
+            }
+        }
+
+        var result = AttributedString()
+        for (index, span) in spans.enumerated() {
+            if index > 0 {
+                result += AttributedString(" ")
+            }
+
+            switch span {
+            case .unchanged(let word):
+                result += AttributedString(word)
+            case .removed(let word):
+                var piece = AttributedString(word)
+                piece.foregroundColor = Color(nsColor: .systemRed)
+                piece.strikethroughStyle = Text.LineStyle(pattern: .solid)
+                result += piece
+            case .inserted(let word):
+                var piece = AttributedString(word)
+                piece.foregroundColor = Color(nsColor: .systemGreen)
+                result += piece
+            }
+        }
+
+        return result
+    }
+}
+
+private struct ReviewTextBox: View {
+    let title: String
+    let text: String
+    let fontSize: CGFloat
+
+    var body: some View {
+        GroupBox(title) {
+            ScrollView {
+                Text(text)
+                    .font(.system(size: fontSize))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(4)
+            }
+            .frame(minHeight: 120, maxHeight: 220)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
 }
 
 // MARK: - Chat Message View
@@ -211,6 +470,8 @@ struct ResponseView: View {
 struct ChatMessageView: View {
     let message: ChatMessage
     let fontSize: CGFloat
+    let responsePresentation: CommandResponsePresentation
+    let onSuggestedPromptTap: ((String) -> Void)?
     @State private var isHovering = false
     @State private var showCopiedFeedback = false
 
@@ -277,7 +538,19 @@ struct ChatMessageView: View {
 
     @ViewBuilder
     private var messageBody: some View {
-        if message.role == "assistant" && message.status == .pending {
+        if message.role == "assistant"
+            && responsePresentation == .writingCoach
+            && message.status == .pending {
+            HStack(alignment: .top, spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+
+                Text("Analyzing writing...")
+                    .font(.system(size: fontSize))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } else if message.role == "assistant" && message.status == .pending {
             HStack(alignment: .top, spacing: 8) {
                 ProgressView()
                     .controlSize(.small)
@@ -292,12 +565,24 @@ struct ChatMessageView: View {
                 .font(.system(size: fontSize))
                 .foregroundStyle(.red)
                 .fixedSize(horizontal: false, vertical: true)
+        } else if message.role == "assistant",
+                  responsePresentation == .writingCoach,
+                  let coachResponse = message.coachResponse {
+            WritingCoachMessageView(
+                response: coachResponse,
+                fontSize: fontSize,
+                onPromptTap: onSuggestedPromptTap
+            )
         } else {
             RichMarkdownView(text: displayContent, fontSize: fontSize)
         }
     }
 
     private var displayContent: String {
+        if let coachResponse = message.coachResponse {
+            return coachResponse.renderedText
+        }
+
         if message.status == .pending && message.content.isEmpty {
             return "Thinking..."
         }
@@ -344,6 +629,13 @@ struct ChatMessageView: View {
 final class ResponseViewModel {
     private static let fontSizeKey = "ResponseView.fontSize"
     private static let defaultFontSize: CGFloat = 14
+    typealias InitialResponseSuccessHandler = @MainActor (String, WritingCoachResponse?) -> Void
+
+    private struct InitialRequest {
+        let systemPrompt: String?
+        let userPrompt: String
+        let images: [Data]
+    }
 
     var messages: [ChatMessage]
     var fontSize: CGFloat {
@@ -358,14 +650,18 @@ final class ResponseViewModel {
     let selectedText: String
     let option: WritingOption?
     let conversationImages: [Data]
+    let reviewContext: ResponseReviewContext?
+    let responsePresentation: CommandResponsePresentation
 
     private let provider: any AIProvider
     private var baseSystemPrompt: String?
     private var conversationHistory: [(role: String, content: String)]
     private var initialAssistantMessageID: UUID?
+    private var initialRequest: InitialRequest?
     private var activeRequestID: UUID?
     private var activeRequestTask: Task<Void, Never>?
     private var onInitialRequestFinished: (() -> Void)?
+    private var onInitialResponseSuccess: InitialResponseSuccessHandler?
     private var isClosed = false
 
     var isRequestInFlight: Bool {
@@ -376,13 +672,50 @@ final class ResponseViewModel {
         !isRequestInFlight && !isClosed
     }
 
+    var isReviewMode: Bool {
+        reviewContext != nil
+    }
+
+    var showsReviewControls: Bool {
+        guard reviewContext != nil else { return false }
+        if responsePresentation == .writingCoach {
+            return shouldShowReviewPanel
+        }
+        return true
+    }
+
+    var shouldShowReviewPanel: Bool {
+        reviewContext != nil
+            && !currentReviewText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var currentReviewText: String {
+        let latestAssistantMessage = messages.last(where: {
+            $0.role == "assistant" && $0.status != .error
+        })
+
+        if responsePresentation == .writingCoach {
+            return latestAssistantMessage?.coachResponse?.trimmedSuggestedRevision ?? ""
+        }
+
+        return latestAssistantMessage?.content ?? ""
+    }
+
+    var canApplyReviewedResult: Bool {
+        isReviewMode
+            && !isRequestInFlight
+            && !currentReviewText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     init(
         initialMessages: [ChatMessage] = [],
         selectedText: String,
         option: WritingOption? = nil,
         provider: any AIProvider,
         conversationImages: [Data] = [],
-        baseSystemPrompt: String? = nil
+        baseSystemPrompt: String? = nil,
+        reviewContext: ResponseReviewContext? = nil,
+        responsePresentation: CommandResponsePresentation = .standard
     ) {
         self.messages = initialMessages
         self.selectedText = selectedText
@@ -390,6 +723,8 @@ final class ResponseViewModel {
         self.provider = provider
         self.conversationImages = conversationImages
         self.baseSystemPrompt = baseSystemPrompt
+        self.reviewContext = reviewContext
+        self.responsePresentation = responsePresentation
         self.conversationHistory = initialMessages
             .filter { $0.status == .complete }
             .map { ($0.role, $0.content) }
@@ -404,12 +739,26 @@ final class ResponseViewModel {
         option: WritingOption? = nil,
         provider: any AIProvider,
         conversationImages: [Data] = [],
-        baseSystemPrompt: String? = nil
+        baseSystemPrompt: String? = nil,
+        reviewContext: ResponseReviewContext? = nil,
+        responsePresentation: CommandResponsePresentation = .standard
     ) {
-        let normalizedContent = content.isEmpty ? "" : content.normalizedForMarkdown()
+        let normalizedContent: String
+        let coachResponse: WritingCoachResponse?
+        if responsePresentation == .writingCoach {
+            normalizedContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
+            coachResponse = WritingCoachResponse.parse(from: normalizedContent)
+        } else {
+            normalizedContent = content.isEmpty ? "" : content.normalizedForMarkdown()
+            coachResponse = nil
+        }
         let initialMessages = normalizedContent.isEmpty
             ? []
-            : [ChatMessage(role: "assistant", content: normalizedContent)]
+            : [ChatMessage(
+                role: "assistant",
+                content: normalizedContent,
+                coachResponse: coachResponse
+            )]
 
         self.init(
             initialMessages: initialMessages,
@@ -417,7 +766,9 @@ final class ResponseViewModel {
             option: option,
             provider: provider,
             conversationImages: conversationImages,
-            baseSystemPrompt: baseSystemPrompt
+            baseSystemPrompt: baseSystemPrompt,
+            reviewContext: reviewContext,
+            responsePresentation: responsePresentation
         )
     }
 
@@ -425,6 +776,7 @@ final class ResponseViewModel {
         systemPrompt: String?,
         userPrompt: String,
         images: [Data],
+        onSuccess: InitialResponseSuccessHandler? = nil,
         onFinish: (() -> Void)? = nil
     ) {
         guard !isClosed else {
@@ -435,6 +787,14 @@ final class ResponseViewModel {
         cancelInFlightWork()
 
         baseSystemPrompt = systemPrompt
+        initialRequest = InitialRequest(
+            systemPrompt: systemPrompt,
+            userPrompt: userPrompt,
+            images: images
+        )
+        if let onSuccess {
+            onInitialResponseSuccess = onSuccess
+        }
         onInitialRequestFinished = onFinish
         isInitialResponsePending = true
 
@@ -452,13 +812,43 @@ final class ResponseViewModel {
         }
     }
 
+    func retryInitialResponse() {
+        guard let initialRequest, !isClosed else { return }
+
+        cancelInFlightWork()
+        messages.removeAll()
+        conversationHistory.removeAll()
+        initialAssistantMessageID = nil
+
+        startInitialResponse(
+            systemPrompt: initialRequest.systemPrompt,
+            userPrompt: initialRequest.userPrompt,
+            images: initialRequest.images
+        )
+    }
+
+    @discardableResult
+    func applyReviewedResult() -> Bool {
+        guard let reviewContext, canApplyReviewedResult else { return false }
+
+        reviewContext.applyAction(currentReviewText)
+        return true
+    }
+
     func beginAssistantPlaceholder() {
         initialAssistantMessageID = appendAssistantPlaceholder()
     }
 
     func completeAssistantMessage(_ content: String) {
         guard let messageID = initialAssistantMessageID else {
-            messages.append(ChatMessage(role: "assistant", content: normalizeAssistantContent(content)))
+            let normalizedContent = normalizeAssistantContent(content)
+            messages.append(
+                ChatMessage(
+                    role: "assistant",
+                    content: normalizedContent,
+                    coachResponse: parseCoachResponse(from: normalizedContent)
+                )
+            )
             return
         }
 
@@ -553,6 +943,8 @@ final class ResponseViewModel {
 
             completeAssistantMessage(response)
             let normalizedResponse = normalizeAssistantContent(response)
+            let coachResponse = parseCoachResponse(from: normalizedResponse)
+            onInitialResponseSuccess?(normalizedResponse, coachResponse)
             if !normalizedResponse.isEmpty {
                 conversationHistory.append((role: "assistant", content: normalizedResponse))
             }
@@ -610,6 +1002,16 @@ final class ResponseViewModel {
     }
 
     private func buildFollowUpSystemPrompt() -> String {
+        if responsePresentation == .writingCoach,
+           let baseSystemPrompt,
+           !baseSystemPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return """
+            \(baseSystemPrompt)
+
+            Continue the writing-coach session using the same JSON schema and response rules. Incorporate the previous coaching context and the user's follow-up request. Return valid JSON only.
+            """
+        }
+
         if let baseSystemPrompt,
            !baseSystemPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return """
@@ -667,7 +1069,11 @@ final class ResponseViewModel {
     }
 
     private func appendAssistantPlaceholder() -> UUID {
-        let placeholder = ChatMessage(role: "assistant", content: "", status: .pending)
+        let placeholder = ChatMessage(
+            role: "assistant",
+            content: "",
+            status: .pending
+        )
         messages.append(placeholder)
         return placeholder.id
     }
@@ -678,10 +1084,14 @@ final class ResponseViewModel {
         status: ChatMessageStatus = .complete
     ) {
         updateMessage(id: id) { message in
-            message.content = status == .complete
+            let normalizedContent = status == .complete
                 ? normalizeAssistantContent(content)
                 : content
+            message.content = normalizedContent
             message.status = status
+            message.coachResponse = status == .complete
+                ? parseCoachResponse(from: normalizedContent)
+                : nil
         }
     }
 
@@ -735,8 +1145,18 @@ final class ResponseViewModel {
     }
 
     private func displayContent(for message: ChatMessage) -> String {
-        if message.status == .pending && message.content.isEmpty {
-            return "Thinking..."
+        if let coachResponse = message.coachResponse {
+            return coachResponse.renderedText
+        }
+
+        if message.status == .pending {
+            if responsePresentation == .writingCoach && message.role == "assistant" {
+                return "Analyzing writing..."
+            }
+
+            if message.content.isEmpty {
+                return "Thinking..."
+            }
         }
 
         return message.content
@@ -744,7 +1164,15 @@ final class ResponseViewModel {
 
     private func normalizeAssistantContent(_ content: String) -> String {
         guard !content.isEmpty else { return content }
+        if responsePresentation == .writingCoach {
+            return content.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         return content.normalizedForMarkdown()
+    }
+
+    private func parseCoachResponse(from content: String) -> WritingCoachResponse? {
+        guard responsePresentation == .writingCoach else { return nil }
+        return WritingCoachResponse.parse(from: content)
     }
 
     private static func errorMessage(for error: Error) -> String {
