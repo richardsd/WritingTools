@@ -539,16 +539,23 @@ struct ChatMessageView: View {
     @ViewBuilder
     private var messageBody: some View {
         if message.role == "assistant"
-            && responsePresentation == .writingCoach
-            && message.status == .pending {
-            HStack(alignment: .top, spacing: 8) {
-                ProgressView()
-                    .controlSize(.small)
+            && responsePresentation == .writingCoach,
+            message.status == .pending {
+            if let streamingPreview = WritingCoachStreamingPreview.parse(from: message.content) {
+                WritingCoachStreamingMessageView(
+                    preview: streamingPreview,
+                    fontSize: fontSize
+                )
+            } else {
+                HStack(alignment: .top, spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
 
-                Text("Analyzing writing...")
-                    .font(.system(size: fontSize))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                    Text("Analyzing writing...")
+                        .font(.system(size: fontSize))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         } else if message.role == "assistant" && message.status == .pending {
             HStack(alignment: .top, spacing: 8) {
@@ -581,6 +588,11 @@ struct ChatMessageView: View {
     private var displayContent: String {
         if let coachResponse = message.coachResponse {
             return coachResponse.renderedText
+        }
+
+        if responsePresentation == .writingCoach,
+           let streamingPreview = WritingCoachStreamingPreview.parse(from: message.content) {
+            return streamingPreview.renderedText
         }
 
         if message.status == .pending && message.content.isEmpty {
@@ -1151,7 +1163,9 @@ final class ResponseViewModel {
 
         if message.status == .pending {
             if responsePresentation == .writingCoach && message.role == "assistant" {
-                return "Analyzing writing..."
+                return WritingCoachStreamingPreview.parse(from: message.content)?
+                    .renderedText
+                    ?? "Analyzing writing..."
             }
 
             if message.content.isEmpty {

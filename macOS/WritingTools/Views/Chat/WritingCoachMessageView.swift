@@ -149,3 +149,164 @@ struct WritingCoachMessageView: View {
         }
     }
 }
+
+struct WritingCoachStreamingMessageView: View {
+    let preview: WritingCoachStreamingPreview
+    let fontSize: CGFloat
+
+    private var strengths: [String] {
+        preview.strengths
+    }
+
+    private var improvements: [WritingCoachStreamingPreview.PriorityImprovement] {
+        preview.priorityImprovements
+    }
+
+    private var followUps: [String] {
+        preview.followUpPrompts
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+
+                Text("Analyzing writing...")
+                    .font(.system(size: fontSize))
+                    .foregroundStyle(.secondary)
+            }
+
+            if let assessment = preview.assessment {
+                coachSection(title: "Assessment") {
+                    Text(assessment)
+                        .font(.system(size: fontSize))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            if !strengths.isEmpty {
+                coachSection(title: "Strengths") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(strengths.enumerated()), id: \.offset) { _, strength in
+                            Label {
+                                Text(strength)
+                                    .font(.system(size: fontSize))
+                                    .fixedSize(horizontal: false, vertical: true)
+                            } icon: {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(.green)
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !improvements.isEmpty {
+                coachSection(title: "Priority Improvements") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        ForEach(improvements) { improvement in
+                            VStack(alignment: .leading, spacing: 8) {
+                                if let issue = improvement.issue?.trimmingCharacters(in: .whitespacesAndNewlines),
+                                   !issue.isEmpty {
+                                    Text(issue)
+                                        .font(.system(size: fontSize, weight: .semibold))
+                                }
+
+                                if let whyItMatters = improvement.whyItMatters?.trimmingCharacters(in: .whitespacesAndNewlines),
+                                   !whyItMatters.isEmpty {
+                                    Text(whyItMatters)
+                                        .font(.system(size: fontSize))
+                                        .foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+
+                                if let before = improvement.before?.trimmingCharacters(in: .whitespacesAndNewlines),
+                                   !before.isEmpty {
+                                    comparisonBlock(
+                                        title: "Before",
+                                        text: before
+                                    )
+                                }
+
+                                if let after = improvement.after?.trimmingCharacters(in: .whitespacesAndNewlines),
+                                   !after.isEmpty {
+                                    comparisonBlock(
+                                        title: "After",
+                                        text: after
+                                    )
+                                }
+                            }
+                            .padding(12)
+                            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                    }
+                }
+            }
+
+            if let outOfScopeReason = preview.outOfScopeReason {
+                coachSection(title: "Why There’s No Suggested Revision") {
+                    Text(outOfScopeReason)
+                        .font(.system(size: fontSize))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            if let suggestedRevision = preview.suggestedRevision {
+                coachSection(title: "Suggested Revision") {
+                    Text(suggestedRevision)
+                        .font(.system(size: fontSize))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            if !followUps.isEmpty {
+                coachSection(title: "Suggested Follow-Ups") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(followUps.enumerated()), id: \.offset) { _, prompt in
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: "arrow.turn.down.right")
+                                    .foregroundStyle(.secondary)
+                                    .padding(.top, 2)
+                                Text(prompt)
+                                    .font(.system(size: fontSize))
+                                    .multilineTextAlignment(.leading)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func coachSection<Content: View>(
+        title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.system(size: fontSize * 0.95, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            content()
+        }
+    }
+
+    @ViewBuilder
+    private func comparisonBlock(title: String, text: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: fontSize * 0.9, weight: .medium))
+                .foregroundStyle(.secondary)
+            Text(text)
+                .font(.system(size: fontSize))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
