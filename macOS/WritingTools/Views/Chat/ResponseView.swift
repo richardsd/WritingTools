@@ -182,6 +182,31 @@ struct ResponseView: View {
                     .animation(.easeInOut, value: viewModel.showCopyConfirmation)
                 }
 
+                if viewModel.showsWritingCoachPresetPicker {
+                    HStack(spacing: 8) {
+                        Text("Mode")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        Picker(
+                            "Tutor Mode",
+                            selection: Binding(
+                                get: { viewModel.currentWritingCoachPreset ?? .general },
+                                set: updateWritingCoachPreset
+                            )
+                        ) {
+                            ForEach(WritingCoachPreset.allCases) { preset in
+                                Text(preset.title).tag(preset)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .frame(minWidth: 140)
+                        .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .layoutPriority(1)
+                }
+
                 Spacer()
 
                 HStack(spacing: 12) {
@@ -294,6 +319,12 @@ struct ResponseView: View {
     private func applyReviewedText() {
         guard viewModel.applyReviewedResult() else { return }
         onClose()
+    }
+
+    private func updateWritingCoachPreset(_ preset: WritingCoachPreset) {
+        inputText = ""
+        reviewDisplayMode = .preview
+        viewModel.changeWritingCoachPreset(to: preset)
     }
 }
 
@@ -647,6 +678,7 @@ final class ResponseViewModel {
         let systemPrompt: String?
         let userPrompt: String
         let images: [Data]
+        let writingCoachPreset: WritingCoachPreset?
     }
 
     var messages: [ChatMessage]
@@ -664,6 +696,7 @@ final class ResponseViewModel {
     let conversationImages: [Data]
     let reviewContext: ResponseReviewContext?
     let responsePresentation: CommandResponsePresentation
+    let writingCoachSystemPromptProvider: ((WritingCoachPreset) -> String)?
 
     private let provider: any AIProvider
     private var baseSystemPrompt: String?
@@ -675,6 +708,7 @@ final class ResponseViewModel {
     private var onInitialRequestFinished: (() -> Void)?
     private var onInitialResponseSuccess: InitialResponseSuccessHandler?
     private var isClosed = false
+    private(set) var currentWritingCoachPreset: WritingCoachPreset?
 
     var isRequestInFlight: Bool {
         activeRequestID != nil
@@ -686,6 +720,10 @@ final class ResponseViewModel {
 
     var isReviewMode: Bool {
         reviewContext != nil
+    }
+
+    var showsWritingCoachPresetPicker: Bool {
+        responsePresentation == .writingCoach && currentWritingCoachPreset != nil
     }
 
     var showsReviewControls: Bool {
@@ -727,7 +765,9 @@ final class ResponseViewModel {
         conversationImages: [Data] = [],
         baseSystemPrompt: String? = nil,
         reviewContext: ResponseReviewContext? = nil,
-        responsePresentation: CommandResponsePresentation = .standard
+        responsePresentation: CommandResponsePresentation = .standard,
+        writingCoachPreset: WritingCoachPreset? = nil,
+        writingCoachSystemPromptProvider: ((WritingCoachPreset) -> String)? = nil
     ) {
         self.messages = initialMessages
         self.selectedText = selectedText
@@ -737,6 +777,11 @@ final class ResponseViewModel {
         self.baseSystemPrompt = baseSystemPrompt
         self.reviewContext = reviewContext
         self.responsePresentation = responsePresentation
+        self.writingCoachSystemPromptProvider = writingCoachSystemPromptProvider
+        self.currentWritingCoachPreset =
+            responsePresentation == .writingCoach
+            ? (writingCoachPreset ?? AppSettings.shared.writingCoachPreset)
+            : nil
         self.conversationHistory = initialMessages
             .filter { $0.status == .complete }
             .map { ($0.role, $0.content) }
@@ -753,7 +798,9 @@ final class ResponseViewModel {
         conversationImages: [Data] = [],
         baseSystemPrompt: String? = nil,
         reviewContext: ResponseReviewContext? = nil,
-        responsePresentation: CommandResponsePresentation = .standard
+        responsePresentation: CommandResponsePresentation = .standard,
+        writingCoachPreset: WritingCoachPreset? = nil,
+        writingCoachSystemPromptProvider: ((WritingCoachPreset) -> String)? = nil
     ) {
         let normalizedContent: String
         let coachResponse: WritingCoachResponse?
@@ -780,7 +827,9 @@ final class ResponseViewModel {
             conversationImages: conversationImages,
             baseSystemPrompt: baseSystemPrompt,
             reviewContext: reviewContext,
-            responsePresentation: responsePresentation
+            responsePresentation: responsePresentation,
+            writingCoachPreset: writingCoachPreset,
+            writingCoachSystemPromptProvider: writingCoachSystemPromptProvider
         )
     }
 
@@ -788,6 +837,7 @@ final class ResponseViewModel {
         systemPrompt: String?,
         userPrompt: String,
         images: [Data],
+        writingCoachPreset: WritingCoachPreset? = nil,
         onSuccess: InitialResponseSuccessHandler? = nil,
         onFinish: (() -> Void)? = nil
     ) {
@@ -802,8 +852,15 @@ final class ResponseViewModel {
         initialRequest = InitialRequest(
             systemPrompt: systemPrompt,
             userPrompt: userPrompt,
-            images: images
+            images: images,
+            writingCoachPreset: writingCoachPreset
         )
+        if responsePresentation == .writingCoach {
+            currentWritingCoachPreset =
+                writingCoachPreset
+                ?? currentWritingCoachPreset
+                ?? AppSettings.shared.writingCoachPreset
+        }
         if let onSuccess {
             onInitialResponseSuccess = onSuccess
         }
@@ -835,7 +892,36 @@ final class ResponseViewModel {
         startInitialResponse(
             systemPrompt: initialRequest.systemPrompt,
             userPrompt: initialRequest.userPrompt,
-            images: initialRequest.images
+            images: initialRequest.images,
+            writingCoachPreset: initialRequest.writingCoachPreset
+        )
+    }
+
+    func changeWritingCoachPreset(to preset: WritingCoachPreset) {
+        guard responsePresentation == .writingCoach,
+              currentWritingCoachPreset != preset else {
+            return
+        }
+
+        AppSettings.shared.writingCoachPreset = preset
+        currentWritingCoachPreset = preset
+
+        cancelInFlightWork()
+        messages.removeAll()
+        conversationHistory.removeAll()
+        initialAssistantMessageID = nil
+
+        let nextSystemPrompt =
+            writingCoachSystemPromptProvider?(preset)
+            ?? WritingCoachPromptBuilder.systemPrompt(for: preset)
+        let nextUserPrompt = initialRequest?.userPrompt ?? selectedText
+        let nextImages = initialRequest?.images ?? conversationImages
+
+        startInitialResponse(
+            systemPrompt: nextSystemPrompt,
+            userPrompt: nextUserPrompt,
+            images: nextImages,
+            writingCoachPreset: preset
         )
     }
 

@@ -41,7 +41,8 @@ final class HistoryManager {
         outputText: String,
         modelName: String?,
         sourceApp: NSRunningApplication?,
-        matchedProfileName: String?
+        matchedProfileName: String?,
+        writingCoachPreset: WritingCoachPreset? = nil
     ) {
         guard AppSettings.shared.isHistoryEnabled else { return }
         guard !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
@@ -54,7 +55,8 @@ final class HistoryManager {
             modelName: modelName,
             sourceAppName: sourceApp?.localizedName,
             sourceAppBundleId: sourceApp?.bundleIdentifier,
-            matchedProfileName: matchedProfileName
+            matchedProfileName: matchedProfileName,
+            writingCoachPreset: writingCoachPreset
         )
 
         entries.insert(entry, at: 0)
@@ -94,6 +96,9 @@ final class HistoryManager {
         }
 
         // Restore selected text and trigger the command
+        if command.responsePresentation == .writingCoach {
+            AppSettings.shared.writingCoachPreset = entry.writingCoachPreset ?? .general
+        }
         appState.selectedText = entry.inputText
         appState.selectedAttributedText = nil
         appState.processCommand(command)

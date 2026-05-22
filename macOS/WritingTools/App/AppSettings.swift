@@ -173,6 +173,11 @@ final class AppSettings {
     var isHistoryEnabled: Bool {
         didSet { defaults.set(isHistoryEnabled, forKey: "is_history_enabled") }
     }
+
+    // MARK: - Writing Coach Settings
+    var writingCoachPreset: WritingCoachPreset {
+        didSet { defaults.set(writingCoachPreset.rawValue, forKey: "writing_coach_preset") }
+    }
     
     // MARK: - Init
     private init() {
@@ -236,6 +241,11 @@ final class AppSettings {
 
         // History - enabled by default
         self.isHistoryEnabled = defaults.object(forKey: "is_history_enabled") as? Bool ?? true
+
+        self.writingCoachPreset =
+            WritingCoachPreset(
+                rawValue: defaults.string(forKey: "writing_coach_preset") ?? ""
+            ) ?? .general
     }
 
     deinit {

@@ -30,6 +30,8 @@ private struct PreparedCommandExecution {
     let canPreserveFormatting: Bool
     let sourceApp: NSRunningApplication?
     let matchedProfileName: String?
+    let writingCoachPreset: WritingCoachPreset?
+    let writingCoachSystemPromptProvider: ((WritingCoachPreset) -> String)?
 }
 
 @Observable
@@ -89,6 +91,10 @@ final class AppState {
         default:
             return localLLMProvider
         }
+    }
+
+    var currentWritingCoachPreset: WritingCoachPreset {
+        AppSettings.shared.writingCoachPreset
     }
 
     // MARK: - Popup Selection Capture
@@ -495,21 +501,41 @@ final class AppState {
             return nil
         }
 
-        let prompt = AppProfileService.shared.enrichSystemPrompt(
-            command.prompt,
-            for: previousApplication
-        )
         let provider = getProvider(for: command)
+        let capturedApp = previousApplication
+        let matchedProfile = capturedApp.map {
+            AppProfileService.shared.resolveProfile(for: ActiveAppContext(from: $0))
+        } ?? nil
+        let writingCoachPreset: WritingCoachPreset?
+        let writingCoachSystemPromptProvider: ((WritingCoachPreset) -> String)?
+        let prompt: String
+
+        if command.responsePresentation == .writingCoach {
+            let selectedPreset = AppSettings.shared.writingCoachPreset
+            writingCoachPreset = selectedPreset
+            writingCoachSystemPromptProvider = { preset in
+                AppProfileService.shared.enrichSystemPrompt(
+                    WritingCoachPromptBuilder.systemPrompt(for: preset),
+                    for: capturedApp
+                )
+            }
+            prompt = writingCoachSystemPromptProvider?(selectedPreset)
+                ?? WritingCoachPromptBuilder.systemPrompt(for: selectedPreset)
+        } else {
+            writingCoachPreset = nil
+            writingCoachSystemPromptProvider = nil
+            prompt = AppProfileService.shared.enrichSystemPrompt(
+                command.prompt,
+                for: capturedApp
+            )
+        }
+
         let replacementContext = makeReplacementContext(
             preserveFormatting: command.preserveFormatting
         )
         let canPreserveFormatting =
             command.preserveFormatting
             && replacementContext.selectedAttributedText != nil
-        let capturedApp = previousApplication
-        let matchedProfile = capturedApp.map {
-            AppProfileService.shared.resolveProfile(for: ActiveAppContext(from: $0))
-        } ?? nil
 
         return PreparedCommandExecution(
             command: command,
@@ -523,7 +549,9 @@ final class AppState {
             replacementContext: replacementContext,
             canPreserveFormatting: canPreserveFormatting,
             sourceApp: capturedApp,
-            matchedProfileName: matchedProfile?.name
+            matchedProfileName: matchedProfile?.name,
+            writingCoachPreset: writingCoachPreset,
+            writingCoachSystemPromptProvider: writingCoachSystemPromptProvider
         )
     }
 
@@ -617,7 +645,9 @@ final class AppState {
             conversationImages: prepared.images,
             baseSystemPrompt: prepared.systemPrompt,
             reviewContext: reviewContext,
-            responsePresentation: prepared.responsePresentation
+            responsePresentation: prepared.responsePresentation,
+            writingCoachPreset: prepared.writingCoachPreset,
+            writingCoachSystemPromptProvider: prepared.writingCoachSystemPromptProvider
         )
 
         let window = ResponseWindow(title: prepared.command.name, viewModel: viewModel)
@@ -634,12 +664,17 @@ final class AppState {
                 systemPrompt: prepared.systemPrompt,
                 userPrompt: prepared.userPrompt,
                 images: prepared.images,
+                writingCoachPreset: prepared.writingCoachPreset,
                 onSuccess: { [weak self] rawContent, coachResponse in
                     guard let self else { return }
                     let outputText = coachResponse?.trimmedSuggestedRevision
                         ?? coachResponse?.renderedText
                         ?? rawContent.normalizedForMarkdown()
-                    self.recordHistory(for: prepared, outputText: outputText)
+                    self.recordHistory(
+                        for: prepared,
+                        outputText: outputText,
+                        writingCoachPreset: viewModel.currentWritingCoachPreset
+                    )
                 },
                 onFinish: { [weak self] in
                     self?.isProcessing = false
@@ -675,7 +710,8 @@ final class AppState {
 
     private func recordHistory(
         for prepared: PreparedCommandExecution,
-        outputText: String
+        outputText: String,
+        writingCoachPreset: WritingCoachPreset? = nil
     ) {
         HistoryManager.shared.record(
             commandName: prepared.command.name,
@@ -686,7 +722,8 @@ final class AppState {
                 ? nil
                 : prepared.provider.modelDisplayName,
             sourceApp: prepared.sourceApp,
-            matchedProfileName: prepared.matchedProfileName
+            matchedProfileName: prepared.matchedProfileName,
+            writingCoachPreset: writingCoachPreset ?? prepared.writingCoachPreset
         )
     }
 

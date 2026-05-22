@@ -15,6 +15,7 @@ struct HistoryEntry: Codable, Identifiable, Equatable {
     let sourceAppBundleId: String?
     /// The name of the matched AppProfile at execution time, if any.
     let matchedProfileName: String?
+    let writingCoachPreset: WritingCoachPreset?
 
     init(
         id: UUID = UUID(),
@@ -26,7 +27,8 @@ struct HistoryEntry: Codable, Identifiable, Equatable {
         modelName: String? = nil,
         sourceAppName: String? = nil,
         sourceAppBundleId: String? = nil,
-        matchedProfileName: String? = nil
+        matchedProfileName: String? = nil,
+        writingCoachPreset: WritingCoachPreset? = nil
     ) {
         self.id = id
         self.timestamp = timestamp
@@ -38,5 +40,6 @@ struct HistoryEntry: Codable, Identifiable, Equatable {
         self.sourceAppName = sourceAppName
         self.sourceAppBundleId = sourceAppBundleId
         self.matchedProfileName = matchedProfileName
+        self.writingCoachPreset = writingCoachPreset
     }
 }

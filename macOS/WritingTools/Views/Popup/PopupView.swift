@@ -592,11 +592,19 @@ struct PopupView: View {
     let providerLabel =
       command.providerOverride.map(friendlyProviderName)
       ?? friendlyProviderName(appState.currentProvider)
+    let subtitle: String
+
+    if command.responsePresentation == .writingCoach {
+      subtitle =
+        "\(modeLabel) · \(appState.currentWritingCoachPreset.title) · \(providerLabel)"
+    } else {
+      subtitle = "\(modeLabel) · \(providerLabel)"
+    }
 
     return PopupPaletteItem(
       id: "command-\(command.id.uuidString)",
       title: command.name,
-      subtitle: "\(modeLabel) · \(providerLabel)",
+      subtitle: subtitle,
       icon: command.icon,
       kind: .command(command),
       isDisabled: command.requiresSelectedText
