@@ -2,12 +2,164 @@ import MLX
 import MLXVLM
 import MLXLLM
 import MLXLMCommon
+import HuggingFace
+import Tokenizers
 import SwiftUI
 import Observation
-import Hub
 import UniformTypeIdentifiers
 
 private let logger = AppLogger.logger("LocalModelProvider")
+
+private enum HuggingFaceModelDownloaderError: LocalizedError {
+    case invalidRepositoryID(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidRepositoryID(let id):
+            return "Invalid Hugging Face repository ID: '\(id)'. Expected format 'namespace/name'."
+        }
+    }
+}
+
+private struct HuggingFaceModelDownloader: Downloader {
+    let client: HubClient
+    let downloadBase: URL
+
+    init(downloadBase: URL) {
+        self.downloadBase = downloadBase
+        self.client = HubClient(cache: HubCache(cacheDirectory: Self.cacheRoot(in: downloadBase)))
+    }
+
+    func download(
+        id: String,
+        revision: String?,
+        matching patterns: [String],
+        useLatest: Bool,
+        progressHandler: @Sendable @escaping (Progress) -> Void
+    ) async throws -> URL {
+        guard let repoID = Repo.ID(rawValue: id) else {
+            throw HuggingFaceModelDownloaderError.invalidRepositoryID(id)
+        }
+
+        let destination = Self.destination(for: id, in: downloadBase)
+        if !useLatest, Self.hasDownloadedFiles(at: destination) {
+            let progress = Progress(totalUnitCount: 1)
+            progress.completedUnitCount = 1
+            progressHandler(progress)
+            return destination
+        }
+
+        try FileManager.default.createDirectory(
+            at: destination,
+            withIntermediateDirectories: true
+        )
+
+        return try await client.downloadSnapshot(
+            of: repoID,
+            to: destination,
+            revision: revision ?? "main",
+            matching: patterns,
+            progressHandler: { @MainActor progress in
+                progressHandler(progress)
+            }
+        )
+    }
+
+    static func destination(for id: String, in root: URL) -> URL {
+        let parts = id.split(separator: "/")
+        if parts.count == 2 {
+            return root
+                .appendingPathComponent("models", isDirectory: true)
+                .appendingPathComponent(String(parts[0]), isDirectory: true)
+                .appendingPathComponent(String(parts[1]), isDirectory: true)
+        }
+
+        return root
+            .appendingPathComponent("models", isDirectory: true)
+            .appendingPathComponent(id.replacingOccurrences(of: "/", with: "_"), isDirectory: true)
+    }
+
+    static func cacheRoot(in root: URL) -> URL {
+        root.appendingPathComponent("hub-cache", isDirectory: true)
+    }
+
+    static func cacheRepositoryDirectory(for id: String, in root: URL) -> URL? {
+        guard let repoID = Repo.ID(rawValue: id) else { return nil }
+        return HubCache(cacheDirectory: cacheRoot(in: root))
+            .repoDirectory(repo: repoID, kind: .model)
+    }
+
+    private static func hasDownloadedFiles(at directory: URL) -> Bool {
+        guard
+            let enumerator = FileManager.default.enumerator(
+                at: directory,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            )
+        else {
+            return false
+        }
+
+        for case let fileURL as URL in enumerator {
+            if (try? fileURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true {
+                return true
+            }
+        }
+
+        return false
+    }
+}
+
+private struct TransformersTokenizerLoader: MLXLMCommon.TokenizerLoader {
+    func load(from directory: URL) async throws -> any MLXLMCommon.Tokenizer {
+        let upstream = try await Tokenizers.AutoTokenizer.from(modelFolder: directory)
+        return TransformersTokenizer(upstream)
+    }
+}
+
+private struct TransformersTokenizer: MLXLMCommon.Tokenizer {
+    private let upstream: any Tokenizers.Tokenizer
+
+    init(_ upstream: any Tokenizers.Tokenizer) {
+        self.upstream = upstream
+    }
+
+    func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+        upstream.encode(text: text, addSpecialTokens: addSpecialTokens)
+    }
+
+    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+        upstream.decode(tokens: tokenIds, skipSpecialTokens: skipSpecialTokens)
+    }
+
+    func convertTokenToId(_ token: String) -> Int? {
+        upstream.convertTokenToId(token)
+    }
+
+    func convertIdToToken(_ id: Int) -> String? {
+        upstream.convertIdToToken(id)
+    }
+
+    var bosToken: String? { upstream.bosToken }
+    var eosToken: String? { upstream.eosToken }
+    var unknownToken: String? { upstream.unknownToken }
+
+    func applyChatTemplate(
+        messages: [[String: any Sendable]],
+        tools: [[String: any Sendable]]?,
+        additionalContext: [String: any Sendable]?
+    ) throws -> [Int] {
+        do {
+            return try upstream.applyChatTemplate(
+                messages: messages,
+                tools: tools,
+                additionalContext: additionalContext
+            )
+        } catch Tokenizers.TokenizerError.missingChatTemplate {
+            throw MLXLMCommon.TokenizerError.missingChatTemplate
+        }
+    }
+}
 
 // MARK: - Memory Monitoring Helper
 
@@ -81,11 +233,14 @@ class LocalModelProvider {
     }()
 
     @ObservationIgnored
-    private lazy var hub: HubApi = {
+    private lazy var downloader = {
         // ensure the folder exists
         try? FileManager.default.createDirectory(at: Self.modelsRoot, withIntermediateDirectories: true)
-        return HubApi(downloadBase: Self.modelsRoot)
+        return HuggingFaceModelDownloader(downloadBase: Self.modelsRoot)
     }()
+
+    @ObservationIgnored
+    private let tokenizerLoader = TransformersTokenizerLoader()
 
     // Is the current platform supported
     var isPlatformSupported: Bool {
@@ -127,18 +282,14 @@ class LocalModelProvider {
 
     private func expectedRepoFolder(for config: ModelConfiguration) -> URL {
         let id = cleanID(from: config)                 // e.g. "mlx-community/gemma-3-4b-it-qat-4bit"
-        let parts = id.split(separator: "/")
-        if parts.count == 2 {
-            return Self.modelsRoot
-                .appendingPathComponent("models", isDirectory: true)
-                .appendingPathComponent(String(parts[0]), isDirectory: true)
-                .appendingPathComponent(String(parts[1]), isDirectory: true)
-        } else {
-            // fallback: flatten if id is unexpected
-            return Self.modelsRoot
-                .appendingPathComponent("models", isDirectory: true)
-                .appendingPathComponent(id.replacingOccurrences(of: "/", with: "_"), isDirectory: true)
-        }
+        return HuggingFaceModelDownloader.destination(for: id, in: Self.modelsRoot)
+    }
+
+    private func cacheRepoFolder(for config: ModelConfiguration) -> URL? {
+        HuggingFaceModelDownloader.cacheRepositoryDirectory(
+            for: cleanID(from: config),
+            in: Self.modelsRoot
+        )
     }
 
     
@@ -500,14 +651,15 @@ class LocalModelProvider {
             
             do {
                 // Select the appropriate factory based on whether it's a vision model
-                let factory: ModelFactory = modelType.isVisionModel
+                let factory: any ModelFactory = modelType.isVisionModel
                 ? VLMModelFactory.shared
                 : LLMModelFactory.shared
                 
                 logger.debug("load: Calling \(modelType.isVisionModel ? "VLM" : "LLM")ModelFactory.shared.loadContainer for \(String(describing: config.id))")
                 
                 let modelContainer = try await factory.loadContainer(
-                    hub: hub,
+                    from: downloader,
+                    using: tokenizerLoader,
                     configuration: config
                 ) { [weak self] progress in
                     Task { @MainActor [weak self] in
@@ -578,12 +730,19 @@ class LocalModelProvider {
             loadState = .loading
             modelInfo = "Loading \(modelType.displayName)..."
             do {
-                let factory: ModelFactory = modelType.isVisionModel
+                guard let modelDir = modelDirectory else {
+                    throw NSError(domain: "LocalLLM", code: -4, userInfo: [NSLocalizedDescriptionKey: "Model directory not found."])
+                }
+
+                let factory: any ModelFactory = modelType.isVisionModel
                 ? VLMModelFactory.shared
                 : LLMModelFactory.shared
                 
                 logger.debug("load: Calling \(modelType.isVisionModel ? "VLM" : "LLM")ModelFactory.shared.loadContainer for \(String(describing: config.id))")
-                let modelContainer = try await factory.loadContainer(hub: hub, configuration: config)
+                let modelContainer = try await factory.loadContainer(
+                    from: modelDir,
+                    using: tokenizerLoader
+                )
                 logger.debug("load: loadContainer completed successfully (from disk).")
                 logGPUMemoryUsage(at: "Model Loaded")
                 let numParams = await modelContainer.perform { context in context.model.numParameters() }
