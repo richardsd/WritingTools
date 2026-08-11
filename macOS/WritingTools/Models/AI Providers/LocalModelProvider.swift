@@ -786,10 +786,8 @@ class LocalModelProvider {
         output = ""
         
         defer {
-            Task { @MainActor [weak self] in
-                self?.running = false
-                self?.isProcessing = false
-            }
+            running = false
+            isProcessing = false
         }
         
         // Load the model

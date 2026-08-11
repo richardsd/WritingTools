@@ -56,6 +56,7 @@ extension String {
 enum ChatMessageStatus: Equatable, Sendable {
     case pending
     case complete
+    case interrupted(ResponseStreamInterruptionReason)
     case error
 }
 
@@ -182,6 +183,14 @@ struct ResponseView: View {
                     .animation(.easeInOut, value: viewModel.showCopyConfirmation)
                 }
 
+                if viewModel.isRequestInFlight {
+                    Button(action: { viewModel.stopActiveRequest() }) {
+                        Label("Stop", systemImage: "stop.fill")
+                    }
+                    .buttonStyle(.bordered)
+                    .help("Stop generating and keep the partial response")
+                }
+
                 if viewModel.showsWritingCoachPresetPicker {
                     HStack(spacing: 8) {
                         Text("Mode")
@@ -272,11 +281,14 @@ struct ResponseView: View {
                     }
                     .padding()
                 }
-                .onChange(of: viewModel.messages, initial: true) { _, newValue in
-                    if let lastID = newValue.last?.id {
-                        withAnimation {
-                            proxy.scrollTo(lastID, anchor: .bottom)
-                        }
+                .onChange(of: viewModel.messageListRevision, initial: true) { _, _ in
+                    if let lastID = viewModel.messages.last?.id {
+                        proxy.scrollTo(lastID, anchor: .bottom)
+                    }
+                }
+                .onChange(of: viewModel.streamUpdateRevision) { _, _ in
+                    if let lastID = viewModel.messages.last?.id {
+                        proxy.scrollTo(lastID, anchor: .bottom)
                     }
                 }
             }
@@ -598,6 +610,19 @@ struct ChatMessageView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+        } else if case .interrupted(let reason) = message.status {
+            VStack(alignment: .leading, spacing: 8) {
+                if !message.content.isEmpty {
+                    RichMarkdownView(text: message.content, fontSize: fontSize)
+                }
+
+                Label(
+                    reason.message,
+                    systemImage: reason == .cancelled ? "stop.circle" : "clock.badge.exclamationmark"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
         } else if message.status == .error {
             Text(displayContent)
                 .font(.system(size: fontSize))
@@ -628,6 +653,10 @@ struct ChatMessageView: View {
 
         if message.status == .pending && message.content.isEmpty {
             return "Thinking..."
+        }
+
+        if case .interrupted(let reason) = message.status, message.content.isEmpty {
+            return reason.message
         }
 
         return message.content
@@ -681,6 +710,24 @@ final class ResponseViewModel {
         let writingCoachPreset: WritingCoachPreset?
     }
 
+    private enum ActiveRequestKind {
+        case initial
+        case followUp(question: String)
+    }
+
+    private struct ActiveRequest {
+        let id: UUID
+        let stream: AITextStreamRequest
+        let messageID: UUID
+        let kind: ActiveRequestKind
+    }
+
+    private enum RequestOutcome {
+        case success(String)
+        case interrupted(ResponseStreamInterruptionReason)
+        case failure(String)
+    }
+
     var messages: [ChatMessage]
     var fontSize: CGFloat {
         didSet {
@@ -690,6 +737,8 @@ final class ResponseViewModel {
     var showCopyConfirmation = false
     private(set) var isInitialResponsePending = false
     private(set) var isFollowUpPending = false
+    private(set) var messageListRevision: UInt = 0
+    private(set) var streamUpdateRevision: UInt = 0
 
     let selectedText: String
     let option: WritingOption?
@@ -699,11 +748,12 @@ final class ResponseViewModel {
     let writingCoachSystemPromptProvider: ((WritingCoachPreset) -> String)?
 
     private let provider: any AIProvider
+    private let streamPumpConfiguration: ResponseStreamPumpConfiguration
     private var baseSystemPrompt: String?
     private var conversationHistory: [(role: String, content: String)]
     private var initialAssistantMessageID: UUID?
     private var initialRequest: InitialRequest?
-    private var activeRequestID: UUID?
+    private var activeRequest: ActiveRequest?
     private var activeRequestTask: Task<Void, Never>?
     private var onInitialRequestFinished: (() -> Void)?
     private var onInitialResponseSuccess: InitialResponseSuccessHandler?
@@ -711,7 +761,7 @@ final class ResponseViewModel {
     private(set) var currentWritingCoachPreset: WritingCoachPreset?
 
     var isRequestInFlight: Bool {
-        activeRequestID != nil
+        activeRequest != nil
     }
 
     var canSendFollowUps: Bool {
@@ -740,15 +790,16 @@ final class ResponseViewModel {
     }
 
     var currentReviewText: String {
-        let latestAssistantMessage = messages.last(where: {
-            $0.role == "assistant" && $0.status != .error
-        })
-
-        if responsePresentation == .writingCoach {
-            return latestAssistantMessage?.coachResponse?.trimmedSuggestedRevision ?? ""
+        guard let latestAssistantMessage = messages.last(where: { $0.role == "assistant" }),
+              latestAssistantMessage.status == .complete else {
+            return ""
         }
 
-        return latestAssistantMessage?.content ?? ""
+        if responsePresentation == .writingCoach {
+            return latestAssistantMessage.coachResponse?.trimmedSuggestedRevision ?? ""
+        }
+
+        return latestAssistantMessage.content
     }
 
     var canApplyReviewedResult: Bool {
@@ -767,12 +818,14 @@ final class ResponseViewModel {
         reviewContext: ResponseReviewContext? = nil,
         responsePresentation: CommandResponsePresentation = .standard,
         writingCoachPreset: WritingCoachPreset? = nil,
-        writingCoachSystemPromptProvider: ((WritingCoachPreset) -> String)? = nil
+        writingCoachSystemPromptProvider: ((WritingCoachPreset) -> String)? = nil,
+        streamPumpConfiguration: ResponseStreamPumpConfiguration = .production
     ) {
         self.messages = initialMessages
         self.selectedText = selectedText
         self.option = option
         self.provider = provider
+        self.streamPumpConfiguration = streamPumpConfiguration
         self.conversationImages = conversationImages
         self.baseSystemPrompt = baseSystemPrompt
         self.reviewContext = reviewContext
@@ -800,7 +853,8 @@ final class ResponseViewModel {
         reviewContext: ResponseReviewContext? = nil,
         responsePresentation: CommandResponsePresentation = .standard,
         writingCoachPreset: WritingCoachPreset? = nil,
-        writingCoachSystemPromptProvider: ((WritingCoachPreset) -> String)? = nil
+        writingCoachSystemPromptProvider: ((WritingCoachPreset) -> String)? = nil,
+        streamPumpConfiguration: ResponseStreamPumpConfiguration = .production
     ) {
         let normalizedContent: String
         let coachResponse: WritingCoachResponse?
@@ -829,7 +883,8 @@ final class ResponseViewModel {
             reviewContext: reviewContext,
             responsePresentation: responsePresentation,
             writingCoachPreset: writingCoachPreset,
-            writingCoachSystemPromptProvider: writingCoachSystemPromptProvider
+            writingCoachSystemPromptProvider: writingCoachSystemPromptProvider,
+            streamPumpConfiguration: streamPumpConfiguration
         )
     }
 
@@ -846,7 +901,7 @@ final class ResponseViewModel {
             return
         }
 
-        cancelInFlightWork()
+        cancelActiveRequest()
 
         baseSystemPrompt = systemPrompt
         initialRequest = InitialRequest(
@@ -868,24 +923,25 @@ final class ResponseViewModel {
         isInitialResponsePending = true
 
         beginAssistantPlaceholder()
-
-        let requestID = UUID()
-        activeRequestID = requestID
-        activeRequestTask = Task { [weak self] in
-            await self?.consumeInitialResponse(
-                requestID: requestID,
-                systemPrompt: systemPrompt,
-                userPrompt: userPrompt,
-                images: images
-            )
+        guard let messageID = initialAssistantMessageID else {
+            finishInitialRequestLifecycle()
+            return
         }
+
+        startRequest(
+            systemPrompt: systemPrompt,
+            userPrompt: userPrompt,
+            images: images,
+            messageID: messageID,
+            kind: .initial
+        )
     }
 
     func retryInitialResponse() {
         guard let initialRequest, !isClosed else { return }
 
-        cancelInFlightWork()
-        messages.removeAll()
+        cancelActiveRequest()
+        removeAllMessages()
         conversationHistory.removeAll()
         initialAssistantMessageID = nil
 
@@ -906,8 +962,8 @@ final class ResponseViewModel {
         AppSettings.shared.writingCoachPreset = preset
         currentWritingCoachPreset = preset
 
-        cancelInFlightWork()
-        messages.removeAll()
+        cancelActiveRequest()
+        removeAllMessages()
         conversationHistory.removeAll()
         initialAssistantMessageID = nil
 
@@ -940,7 +996,7 @@ final class ResponseViewModel {
     func completeAssistantMessage(_ content: String) {
         guard let messageID = initialAssistantMessageID else {
             let normalizedContent = normalizeAssistantContent(content)
-            messages.append(
+            appendMessage(
                 ChatMessage(
                     role: "assistant",
                     content: normalizedContent,
@@ -956,7 +1012,7 @@ final class ResponseViewModel {
 
     func failInitialRequest(_ message: String) {
         guard let messageID = initialAssistantMessageID else {
-            messages.append(ChatMessage(role: "assistant", content: message, status: .error))
+            appendMessage(ChatMessage(role: "assistant", content: message, status: .error))
             return
         }
 
@@ -972,21 +1028,21 @@ final class ResponseViewModel {
     func processFollowUpQuestion(_ question: String) {
         guard canSendFollowUps, !question.isEmpty else { return }
 
-        cancelInFlightWork()
-
-        messages.append(ChatMessage(role: "user", content: question))
+        appendMessage(ChatMessage(role: "user", content: question))
         isFollowUpPending = true
 
         let placeholderID = appendAssistantPlaceholder()
-        let requestID = UUID()
-        activeRequestID = requestID
-        activeRequestTask = Task { [weak self] in
-            await self?.consumeFollowUpResponse(
-                requestID: requestID,
-                question: question,
-                placeholderID: placeholderID
-            )
-        }
+        startRequest(
+            systemPrompt: buildFollowUpSystemPrompt(),
+            userPrompt: buildContextualPrompt(for: question),
+            images: conversationImages,
+            messageID: placeholderID,
+            kind: .followUp(question: question)
+        )
+    }
+
+    func stopActiveRequest() {
+        cancelActiveRequest(reason: .cancelled)
     }
 
     func copyContent() {
@@ -1015,87 +1071,66 @@ final class ResponseViewModel {
     func markClosed() {
         guard !isClosed else { return }
         isClosed = true
-        cancelInFlightWork()
+        cancelActiveRequest(reason: .cancelled)
     }
 
-    private func consumeInitialResponse(
-        requestID: UUID,
+    private func startRequest(
         systemPrompt: String?,
         userPrompt: String,
-        images: [Data]
-    ) async {
-        do {
-            var response = ""
+        images: [Data],
+        messageID: UUID,
+        kind: ActiveRequestKind
+    ) {
+        let stream = provider.processTextStream(
+            systemPrompt: systemPrompt,
+            userPrompt: userPrompt,
+            images: images
+        )
+        let request = ActiveRequest(
+            id: stream.id,
+            stream: stream,
+            messageID: messageID,
+            kind: kind
+        )
+        activeRequest = request
 
-            for try await delta in provider.processTextStream(
-                systemPrompt: systemPrompt,
-                userPrompt: userPrompt,
-                images: images
-            ) {
-                guard shouldApplyUpdates(for: requestID) else { return }
-                response += delta
-                appendAssistantDelta(delta)
-            }
-
-            guard shouldApplyUpdates(for: requestID) else { return }
-
-            completeAssistantMessage(response)
-            let normalizedResponse = normalizeAssistantContent(response)
-            let coachResponse = parseCoachResponse(from: normalizedResponse)
-            onInitialResponseSuccess?(normalizedResponse, coachResponse)
-            if !normalizedResponse.isEmpty {
-                conversationHistory.append((role: "assistant", content: normalizedResponse))
-            }
-            finishActiveRequest(initialRequest: true)
-        } catch is CancellationError {
-            guard activeRequestID == requestID || isClosed else { return }
-            finishActiveRequest(initialRequest: true)
-        } catch {
-            guard shouldApplyUpdates(for: requestID) else { return }
-            failInitialRequest(Self.errorMessage(for: error))
-            finishActiveRequest(initialRequest: true)
+        activeRequestTask = Task { [weak self] in
+            await self?.consume(request)
         }
     }
 
-    private func consumeFollowUpResponse(
-        requestID: UUID,
-        question: String,
-        placeholderID: UUID
-    ) async {
+    private func consume(_ request: ActiveRequest) async {
+        var response = ""
+
         do {
-            var response = ""
-
-            for try await delta in provider.processTextStream(
-                systemPrompt: buildFollowUpSystemPrompt(),
-                userPrompt: buildContextualPrompt(for: question),
-                images: conversationImages
-            ) {
-                guard shouldApplyUpdates(for: requestID) else { return }
-                response += delta
-                appendAssistantDelta(delta, id: placeholderID)
-            }
-
-            guard shouldApplyUpdates(for: requestID) else { return }
-
-            completeAssistantMessage(response, id: placeholderID)
-            conversationHistory.append((role: "user", content: question))
-
-            let normalizedResponse = normalizeAssistantContent(response)
-            if !normalizedResponse.isEmpty {
-                conversationHistory.append((role: "assistant", content: normalizedResponse))
-            }
-            finishActiveRequest(initialRequest: false)
-        } catch is CancellationError {
-            guard activeRequestID == requestID || isClosed else { return }
-            finishActiveRequest(initialRequest: false)
-        } catch {
-            guard shouldApplyUpdates(for: requestID) else { return }
-            completeAssistantMessage(
-                Self.errorMessage(for: error),
-                id: placeholderID,
-                status: .error
+            let batches = ResponseStreamPump.batchedValues(
+                from: request.stream,
+                configuration: streamPumpConfiguration
             )
-            finishActiveRequest(initialRequest: false)
+
+            for try await batch in batches {
+                guard shouldApplyUpdates(for: request.id) else { return }
+                response += batch
+                appendAssistantDelta(batch, id: request.messageID)
+            }
+
+            guard shouldApplyUpdates(for: request.id) else { return }
+            finishActiveRequest(id: request.id, outcome: .success(response))
+        } catch let error as ResponseStreamPumpError {
+            guard shouldApplyUpdates(for: request.id) else { return }
+            switch error {
+            case .initialTimeout, .idleTimeout:
+                finishActiveRequest(id: request.id, outcome: .interrupted(.timedOut))
+            }
+        } catch is CancellationError {
+            guard shouldApplyUpdates(for: request.id) else { return }
+            finishActiveRequest(id: request.id, outcome: .interrupted(.cancelled))
+        } catch {
+            guard shouldApplyUpdates(for: request.id) else { return }
+            finishActiveRequest(
+                id: request.id,
+                outcome: .failure(Self.errorMessage(for: error))
+            )
         }
     }
 
@@ -1172,7 +1207,7 @@ final class ResponseViewModel {
             content: "",
             status: .pending
         )
-        messages.append(placeholder)
+        appendMessage(placeholder)
         return placeholder.id
     }
 
@@ -1194,52 +1229,106 @@ final class ResponseViewModel {
     }
 
     private func appendAssistantDelta(_ delta: String, id: UUID) {
-        updateMessage(id: id) { message in
+        guard !delta.isEmpty else { return }
+        let didUpdate = updateMessage(id: id) { message in
             message.content += delta
             message.status = .pending
         }
+        if didUpdate {
+            streamUpdateRevision &+= 1
+        }
     }
 
-    private func updateMessage(id: UUID, update: (inout ChatMessage) -> Void) {
-        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
+    @discardableResult
+    private func updateMessage(id: UUID, update: (inout ChatMessage) -> Void) -> Bool {
+        guard let index = messages.firstIndex(where: { $0.id == id }) else { return false }
 
         var message = messages[index]
         update(&message)
         messages[index] = message
+        return true
     }
 
-    private func cancelInFlightWork() {
-        activeRequestID = nil
+    private func appendMessage(_ message: ChatMessage) {
+        messages.append(message)
+        messageListRevision &+= 1
+    }
+
+    private func removeAllMessages() {
+        guard !messages.isEmpty else { return }
+        messages.removeAll()
+        messageListRevision &+= 1
+    }
+
+    private func cancelActiveRequest(
+        reason: ResponseStreamInterruptionReason = .cancelled
+    ) {
+        guard let request = activeRequest else {
+            isFollowUpPending = false
+            if isInitialResponsePending {
+                finishInitialRequestLifecycle()
+            }
+            return
+        }
+
+        request.stream.cancel()
         activeRequestTask?.cancel()
-        activeRequestTask = nil
-        provider.cancel()
-
-        if isInitialResponsePending {
-            let callback = onInitialRequestFinished
-            onInitialRequestFinished = nil
-            isInitialResponsePending = false
-            callback?()
-        }
-
-        isFollowUpPending = false
-        initialAssistantMessageID = nil
+        finishActiveRequest(id: request.id, outcome: .interrupted(reason))
     }
 
-    private func finishActiveRequest(initialRequest: Bool) {
-        activeRequestID = nil
+    private func finishActiveRequest(id: UUID, outcome: RequestOutcome) {
+        guard let request = activeRequest, request.id == id else { return }
+
+        activeRequest = nil
         activeRequestTask = nil
         isFollowUpPending = false
 
-        if initialRequest {
-            isInitialResponsePending = false
-            let callback = onInitialRequestFinished
-            onInitialRequestFinished = nil
-            callback?()
+        switch outcome {
+        case .success(let response):
+            completeAssistantMessage(response, id: request.messageID)
+            let normalizedResponse = normalizeAssistantContent(response)
+
+            switch request.kind {
+            case .initial:
+                let coachResponse = parseCoachResponse(from: normalizedResponse)
+                onInitialResponseSuccess?(normalizedResponse, coachResponse)
+                if !normalizedResponse.isEmpty {
+                    conversationHistory.append((role: "assistant", content: normalizedResponse))
+                }
+            case .followUp(let question):
+                conversationHistory.append((role: "user", content: question))
+                if !normalizedResponse.isEmpty {
+                    conversationHistory.append((role: "assistant", content: normalizedResponse))
+                }
+            }
+
+        case .interrupted(let reason):
+            updateMessage(id: request.messageID) { message in
+                message.status = .interrupted(reason)
+                message.coachResponse = nil
+            }
+
+        case .failure(let message):
+            completeAssistantMessage(message, id: request.messageID, status: .error)
         }
+
+        if case .initial = request.kind {
+            if initialAssistantMessageID == request.messageID {
+                initialAssistantMessageID = nil
+            }
+            finishInitialRequestLifecycle()
+        }
+    }
+
+    private func finishInitialRequestLifecycle() {
+        isInitialResponsePending = false
+        let callback = onInitialRequestFinished
+        onInitialRequestFinished = nil
+        callback?()
     }
 
     private func shouldApplyUpdates(for requestID: UUID) -> Bool {
-        activeRequestID == requestID && !isClosed
+        activeRequest?.id == requestID && !isClosed
     }
 
     private func displayContent(for message: ChatMessage) -> String {
@@ -1257,6 +1346,10 @@ final class ResponseViewModel {
             if message.content.isEmpty {
                 return "Thinking..."
             }
+        }
+
+        if case .interrupted(let reason) = message.status, message.content.isEmpty {
+            return reason.message
         }
 
         return message.content

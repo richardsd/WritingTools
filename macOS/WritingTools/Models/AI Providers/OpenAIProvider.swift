@@ -205,7 +205,7 @@ final class OpenAIProvider: AIProvider {
     var isProcessing = false
     private var config: OpenAIConfig
     private var aiProxyService: OpenAIService?
-    private var currentTask: Task<Void, Never>?
+    private let streamActivity = AITextStreamActivityTracker()
 
     var modelDisplayName: String { config.model }
     
@@ -340,19 +340,23 @@ final class OpenAIProvider: AIProvider {
         systemPrompt: String?,
         userPrompt: String,
         images: [Data]
-    ) -> AsyncThrowingStream<String, Error> {
-        AsyncThrowingStream { continuation in
-            isProcessing = true
+    ) -> AITextStreamRequest {
+        let requestID = UUID()
+        let cancellation = AITextStreamCancellation()
+        streamActivity.begin(requestID)
+        isProcessing = true
 
-            currentTask = Task { [weak self] in
+        let values = AsyncThrowingStream<String, Error> { continuation in
+            let activity = streamActivity
+            let task = Task { [weak self] in
+                defer {
+                    let hasActiveRequests = activity.finish(requestID)
+                    self?.isProcessing = hasActiveRequests
+                }
+
                 guard let self else {
                     continuation.finish()
                     return
-                }
-
-                defer {
-                    self.isProcessing = false
-                    self.currentTask = nil
                 }
 
                 do {
@@ -387,10 +391,15 @@ final class OpenAIProvider: AIProvider {
                 }
             }
 
-            continuation.onTermination = { _ in
-                self.currentTask?.cancel()
-            }
+            cancellation.install { task.cancel() }
+            continuation.onTermination = { _ in cancellation.cancel() }
         }
+
+        return AITextStreamRequest(
+            id: requestID,
+            values: values,
+            cancellation: cancellation
+        )
     }
     
     // MARK: - API Key Processing
@@ -897,8 +906,6 @@ final class OpenAIProvider: AIProvider {
 
     
     func cancel() {
-        currentTask?.cancel()
-        isProcessing = false
-        currentTask = nil
+        // Stream requests are cancelled by their request-scoped handles.
     }
 }

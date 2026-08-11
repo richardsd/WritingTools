@@ -14,7 +14,6 @@ final class CustomProvider: AIProvider {
     var isProcessing: Bool = false
 
     private let config: CustomProviderConfig
-    private var currentTask: Task<Void, Never>?
 
     var modelDisplayName: String { config.model }
 
@@ -147,9 +146,7 @@ final class CustomProvider: AIProvider {
     }
 
     func cancel() {
-        currentTask?.cancel()
-        currentTask = nil
-        isProcessing = false
+        // Stream requests are cancelled by their request-scoped handles.
     }
 }
 

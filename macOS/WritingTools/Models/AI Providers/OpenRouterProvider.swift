@@ -37,7 +37,7 @@ final class OpenRouterProvider: AIProvider {
 
     private var config: OpenRouterConfig
     private var aiProxyService: OpenRouterService?
-    private var currentTask: Task<Void, Never>?
+    private let streamActivity = AITextStreamActivityTracker()
     
     init(config: OpenRouterConfig) {
         self.config = config
@@ -137,19 +137,23 @@ final class OpenRouterProvider: AIProvider {
         systemPrompt: String?,
         userPrompt: String,
         images: [Data]
-    ) -> AsyncThrowingStream<String, Error> {
-        AsyncThrowingStream { continuation in
-            isProcessing = true
+    ) -> AITextStreamRequest {
+        let requestID = UUID()
+        let cancellation = AITextStreamCancellation()
+        streamActivity.begin(requestID)
+        isProcessing = true
 
-            currentTask = Task { [weak self] in
+        let values = AsyncThrowingStream<String, Error> { continuation in
+            let activity = streamActivity
+            let task = Task { [weak self] in
+                defer {
+                    let hasActiveRequests = activity.finish(requestID)
+                    self?.isProcessing = hasActiveRequests
+                }
+
                 guard let self else {
                     continuation.finish()
                     return
-                }
-
-                defer {
-                    self.isProcessing = false
-                    self.currentTask = nil
                 }
 
                 do {
@@ -235,15 +239,18 @@ final class OpenRouterProvider: AIProvider {
                 }
             }
 
-            continuation.onTermination = { _ in
-                self.currentTask?.cancel()
-            }
+            cancellation.install { task.cancel() }
+            continuation.onTermination = { _ in cancellation.cancel() }
         }
+
+        return AITextStreamRequest(
+            id: requestID,
+            values: values,
+            cancellation: cancellation
+        )
     }
 
     func cancel() {
-        currentTask?.cancel()
-        currentTask = nil
-        isProcessing = false
+        // Stream requests are cancelled by their request-scoped handles.
     }
 }

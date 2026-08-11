@@ -34,7 +34,6 @@ final class GeminiProvider: AIProvider {
     var isProcessing = false
     private var config: GeminiConfig
     private var aiProxyService: GeminiService?
-    private var currentTask: Task<Void, Never>?
     
     var modelDisplayName: String { config.modelName }
 
@@ -119,8 +118,6 @@ final class GeminiProvider: AIProvider {
     }
     
     func cancel() {
-        currentTask?.cancel()
-        currentTask = nil
-        isProcessing = false
+        // Stream requests are cancelled by their request-scoped handles.
     }
 }

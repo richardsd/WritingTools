@@ -21,8 +21,19 @@
 		42A11C052F00000100ABCDEF /* Tokenizers in Frameworks */ = {isa = PBXBuildFile; productRef = 42A11C042F00000100ABCDEF /* Tokenizers */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		D0000000000000000000000A /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 2ABCBC162CDEB606001E4B5E /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 2ABCBC1D2CDEB606001E4B5E;
+			remoteInfo = WritingTools;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		4293055F2E2FD66E00685531 /* WritingTools.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = WritingTools.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		D00000000000000000000001 /* WritingToolsTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WritingToolsTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -42,6 +53,11 @@
 				420B81B12E2D8211008D014D /* Exceptions for "WritingTools" folder in "WritingTools" target */,
 			);
 			path = WritingTools;
+			sourceTree = "<group>";
+		};
+		D00000000000000000000002 /* WritingToolsTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = WritingToolsTests;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -66,6 +82,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		D00000000000000000000003 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -73,7 +96,9 @@
 			isa = PBXGroup;
 			children = (
 				2ABCBC202CDEB606001E4B5E /* WritingTools */,
+				D00000000000000000000002 /* WritingToolsTests */,
 				4293055F2E2FD66E00685531 /* WritingTools.app */,
+				D00000000000000000000001 /* WritingToolsTests.xctest */,
 			);
 			sourceTree = "<group>";
 		};
@@ -114,6 +139,29 @@
 			productReference = 4293055F2E2FD66E00685531 /* WritingTools.app */;
 			productType = "com.apple.product-type.application";
 		};
+		D00000000000000000000006 /* WritingToolsTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D00000000000000000000009 /* Build configuration list for PBXNativeTarget "WritingToolsTests" */;
+			buildPhases = (
+				D00000000000000000000004 /* Sources */,
+				D00000000000000000000003 /* Frameworks */,
+				D00000000000000000000005 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				D0000000000000000000000B /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				D00000000000000000000002 /* WritingToolsTests */,
+			);
+			name = WritingToolsTests;
+			packageProductDependencies = (
+			);
+			productName = WritingToolsTests;
+			productReference = D00000000000000000000001 /* WritingToolsTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -126,6 +174,10 @@
 				TargetAttributes = {
 					2ABCBC1D2CDEB606001E4B5E = {
 						CreatedOnToolsVersion = 16.1;
+					};
+					D00000000000000000000006 = {
+						CreatedOnToolsVersion = 16.1;
+						TestTargetID = 2ABCBC1D2CDEB606001E4B5E;
 					};
 				};
 			};
@@ -158,12 +210,20 @@
 			projectRoot = "";
 			targets = (
 				2ABCBC1D2CDEB606001E4B5E /* WritingTools */,
+				D00000000000000000000006 /* WritingToolsTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		2ABCBC1C2CDEB606001E4B5E /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D00000000000000000000005 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -180,7 +240,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		D00000000000000000000004 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		D0000000000000000000000B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 2ABCBC1D2CDEB606001E4B5E /* WritingTools */;
+			targetProxy = D0000000000000000000000A /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		2ABCBC412CDEB607001E4B5E /* Debug */ = {
@@ -413,6 +488,34 @@
 			};
 			name = Release;
 		};
+		D00000000000000000000007 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.aryamirsepasi.writing-tools.tests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/WritingTools.app/Contents/MacOS/WritingTools";
+			};
+			name = Debug;
+		};
+		D00000000000000000000008 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.aryamirsepasi.writing-tools.tests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/WritingTools.app/Contents/MacOS/WritingTools";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -430,6 +533,15 @@
 			buildConfigurations = (
 				2ABCBC442CDEB607001E4B5E /* Debug */,
 				2ABCBC452CDEB607001E4B5E /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		D00000000000000000000009 /* Build configuration list for PBXNativeTarget "WritingToolsTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D00000000000000000000007 /* Debug */,
+				D00000000000000000000008 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

@@ -162,8 +162,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func executeCommandDirectly(_ command: CommandModel) {
-        appState.activeProvider.cancel()
-
         Task { @MainActor in
             // Check accessibility permissions first
             let hasAccessibility = AXIsProcessTrusted()
@@ -508,8 +506,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @MainActor
     private func showPopup() {
-        appState.activeProvider.cancel()
-
         let previousApplication = NSWorkspace.shared.frontmostApplication
         let selectionContext = PopupSelectionContext(
             previousApplication: previousApplication,
