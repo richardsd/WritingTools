@@ -15,39 +15,14 @@ struct OpenAISettingsView: View {
     @State private var authError: String?
     @State private var showingErrorAlert = false
     @State private var showingModelInfo = false
-    @State private var selectedModelForInfo: OpenAIModel?
+    @State private var selectedModelForInfo: CodexOAuthModel?
     
     private var authMode: OpenAIAuthMode {
         OpenAIAuthMode(rawValue: settings.openAIAuthMode) ?? .apiKey
     }
     
-    // Sorted models: Recommended → Current (newest) → Preview → Legacy
-    private var sortedModels: [OpenAIModel] {
-        OpenAIModel.allCases.sorted { model1, model2 in
-            let meta1 = model1.metadata
-            let meta2 = model2.metadata
-            
-            // Recommended first
-            if meta1.isRecommended != meta2.isRecommended {
-                return meta1.isRecommended
-            }
-            
-            // Then by status priority: current > preview > legacy > deprecated
-            let statusPriority: [ModelStatus: Int] = [
-                .current: 3,
-                .preview: 2,
-                .legacy: 1,
-                .deprecated: 0
-            ]
-            let priority1 = statusPriority[meta1.status] ?? 0
-            let priority2 = statusPriority[meta2.status] ?? 0
-            if priority1 != priority2 {
-                return priority1 > priority2
-            }
-            
-            // Then by release date (newest first)
-            return meta1.releaseDate > meta2.releaseDate
-        }
+    private var selectedOAuthModel: CodexOAuthModel {
+        CodexOAuthModel(rawValue: settings.openAIOAuthModel) ?? .defaultModel
     }
 
     var body: some View {
@@ -95,10 +70,9 @@ struct OpenAISettingsView: View {
     // MARK: - Model Picker Row
     
     @ViewBuilder
-    private func modelPickerRow(for model: OpenAIModel) -> some View {
+    private func oauthModelPickerRow(for model: CodexOAuthModel) -> some View {
         HStack(spacing: 8) {
-            // Recommended star
-            if model.metadata.isRecommended {
+            if model == .defaultModel {
                 Image(systemName: "star.fill")
                     .foregroundStyle(.yellow)
                     .font(.caption)
@@ -109,17 +83,15 @@ struct OpenAISettingsView: View {
                     Text(model.metadata.displayName)
                         .font(.body)
                     
-                    // Tier badge
-                    Text(model.metadata.tier.displayName)
+                    Text(model.metadata.availability)
                         .font(.caption2)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(tierBadgeColor(model.metadata.tier))
+                        .background(model == .gpt53CodexSpark ? Color.purple : Color.blue)
                         .foregroundStyle(.white)
                         .cornerRadius(4)
-                    
-                    // Status badge (only for preview/legacy)
-                    if model.metadata.status == .preview || model.metadata.status == .legacy {
+
+                    if model.metadata.status != .current {
                         Text(model.metadata.status.rawValue)
                             .font(.caption2)
                             .padding(.horizontal, 6)
@@ -138,20 +110,11 @@ struct OpenAISettingsView: View {
         }
     }
     
-    private func tierBadgeColor(_ tier: SubscriptionTier) -> Color {
-        switch tier {
-        case .plus: return .blue
-        case .pro: return .purple
-        case .api: return .gray
-        }
-    }
-    
-    private func statusBadgeColor(_ status: ModelStatus) -> Color {
+    private func statusBadgeColor(_ status: CodexOAuthModelStatus) -> Color {
         switch status {
         case .current: return .green
         case .preview: return .orange
-        case .legacy: return .gray
-        case .deprecated: return .red
+        case .older: return .gray
         }
     }
     
@@ -274,6 +237,27 @@ struct OpenAISettingsView: View {
                     }
                 }
             }
+
+            if let migrationNotice = settings.openAIOAuthMigrationNotice {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .foregroundStyle(.blue)
+
+                    Text(migrationNotice)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+
+                    Button("Dismiss") {
+                        settings.openAIOAuthMigrationNotice = nil
+                    }
+                    .buttonStyle(.plain)
+                    .font(.caption)
+                }
+                .padding(10)
+                .background(Color.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+            }
             
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
@@ -284,7 +268,7 @@ struct OpenAISettingsView: View {
                     Spacer()
                     
                     Button(action: {
-                        selectedModelForInfo = OpenAIModel(rawValue: settings.openAIModel)
+                        selectedModelForInfo = selectedOAuthModel
                         showingModelInfo = true
                     }) {
                         Image(systemName: "info.circle")
@@ -294,17 +278,60 @@ struct OpenAISettingsView: View {
                     .help("Show model information")
                 }
                 
-                Picker("Model", selection: $settings.openAIModel) {
-                    ForEach(sortedModels, id: \.rawValue) { model in
-                        modelPickerRow(for: model)
-                            .tag(model.rawValue)
+                Picker("Model", selection: $settings.openAIOAuthModel) {
+                    ForEach(CodexOAuthModelGroup.allCases) { group in
+                        Section(group.rawValue) {
+                            ForEach(CodexOAuthModel.models(in: group)) { model in
+                                oauthModelPickerRow(for: model)
+                                    .tag(model.rawValue)
+                            }
+                        }
                     }
                 }
-                .onChange(of: settings.openAIModel) { _, _ in
+                .onChange(of: settings.openAIOAuthModel) { _, newModelID in
+                    let model = CodexOAuthModel(rawValue: newModelID) ?? .defaultModel
+                    let currentEffort = CodexReasoningEffort(
+                        rawValue: settings.openAIOAuthReasoningEffort
+                    ) ?? CodexOAuthModel.defaultEffort
+                    settings.openAIOAuthReasoningEffort = currentEffort
+                        .normalized(for: model)
+                        .rawValue
                     needsSaving = true
                 }
                 
                 Text("Select the model you want to use for text processing.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if let retirementNotice = selectedOAuthModel.metadata.retirementNotice {
+                    Label(retirementNotice, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                } else if !selectedOAuthModel.supportsImages {
+                    Label("This model accepts text only.", systemImage: "textformat")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Reasoning Effort")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                Picker("Reasoning", selection: $settings.openAIOAuthReasoningEffort) {
+                    ForEach(selectedOAuthModel.supportedReasoningEfforts) { effort in
+                        Text(effort.displayName).tag(effort.rawValue)
+                    }
+                }
+                .onChange(of: settings.openAIOAuthReasoningEffort) { _, _ in
+                    needsSaving = true
+                }
+
+                let selectedEffort = CodexReasoningEffort(
+                    rawValue: settings.openAIOAuthReasoningEffort
+                ) ?? selectedOAuthModel.recommendedReasoningEffort
+                Text(selectedEffort.description)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -322,8 +349,11 @@ struct OpenAISettingsView: View {
                 let config = OpenAIConfig(
                     apiKey: "",
                     baseURL: settings.openAIBaseURL,
-                    model: settings.openAIModel,
-                    authMode: .oauth
+                    model: settings.openAIOAuthModel,
+                    authMode: .oauth,
+                    oauthReasoningEffort: CodexReasoningEffort(
+                        rawValue: settings.openAIOAuthReasoningEffort
+                    ) ?? CodexOAuthModel.defaultEffort
                 )
                 let provider = OpenAIProvider(config: config)
                 try await provider.initiateOAuthFlow()
@@ -356,7 +386,7 @@ struct OpenAISettingsView: View {
 // MARK: - Model Info Sheet
 
 struct ModelInfoSheet: View {
-    let model: OpenAIModel
+    let model: CodexOAuthModel
     @Environment(\.dismiss) private var dismiss
     
     var body: some View {
@@ -369,17 +399,15 @@ struct ModelInfoSheet: View {
                             .font(.title2)
                             .fontWeight(.semibold)
                         
-                        // Tier badge
-                        Text(model.metadata.tier.displayName)
+                        Text(model.metadata.availability)
                             .font(.caption)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
-                            .background(tierBadgeColor(model.metadata.tier))
+                            .background(model == .gpt53CodexSpark ? Color.purple : Color.blue)
                             .foregroundStyle(.white)
                             .cornerRadius(6)
                     }
                     
-                    // Status badge if not current
                     if model.metadata.status != .current {
                         HStack(spacing: 4) {
                             Image(systemName: statusIcon(model.metadata.status))
@@ -414,25 +442,35 @@ struct ModelInfoSheet: View {
                     .foregroundStyle(.secondary)
             }
             
-            // Details
             VStack(alignment: .leading, spacing: 8) {
                 Text("Details")
                     .font(.headline)
                 
+                DetailRow(label: "Model ID", value: model.rawValue)
                 DetailRow(label: "Status", value: model.metadata.status.rawValue)
-                DetailRow(label: "Required", value: "ChatGPT \(model.metadata.tier.displayName) subscription")
-                DetailRow(label: "Released", value: formatReleaseDate(model.metadata.releaseDate))
-                
-                if model.metadata.isRecommended {
+                DetailRow(label: "Available with", value: model.metadata.availability)
+                DetailRow(label: "Images", value: model.supportsImages ? "Supported" : "Text only")
+                DetailRow(
+                    label: "Reasoning",
+                    value: model.supportedReasoningEfforts.map(\.displayName).joined(separator: ", ")
+                )
+
+                if model == .defaultModel {
                     HStack(spacing: 6) {
                         Image(systemName: "star.fill")
                             .foregroundStyle(.yellow)
                             .font(.caption)
-                        Text("Recommended model")
+                        Text("Default model")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
+            }
+
+            if let retirementNotice = model.metadata.retirementNotice {
+                Label(retirementNotice, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
             }
             
             Spacer()
@@ -450,46 +488,21 @@ struct ModelInfoSheet: View {
         .padding(24)
         .frame(width: 450, height: 400)
     }
-    
-    private func tierBadgeColor(_ tier: SubscriptionTier) -> Color {
-        switch tier {
-        case .plus: return .blue
-        case .pro: return .purple
-        case .api: return .gray
-        }
-    }
-    
-    private func statusBadgeColor(_ status: ModelStatus) -> Color {
+
+    private func statusBadgeColor(_ status: CodexOAuthModelStatus) -> Color {
         switch status {
         case .current: return .green
         case .preview: return .orange
-        case .legacy: return .gray
-        case .deprecated: return .red
+        case .older: return .gray
         }
     }
-    
-    private func statusIcon(_ status: ModelStatus) -> String {
+
+    private func statusIcon(_ status: CodexOAuthModelStatus) -> String {
         switch status {
         case .current: return "checkmark.circle.fill"
         case .preview: return "sparkles"
-        case .legacy: return "clock"
-        case .deprecated: return "exclamationmark.triangle"
+        case .older: return "clock"
         }
-    }
-    
-    private func formatReleaseDate(_ date: String) -> String {
-        // Format "2026-01" to "January 2026"
-        let components = date.split(separator: "-")
-        guard components.count == 2,
-              let year = components.first,
-              let monthNum = Int(components.last ?? "") else {
-            return date
-        }
-        
-        let months = ["January", "February", "March", "April", "May", "June",
-                      "July", "August", "September", "October", "November", "December"]
-        let monthName = (monthNum >= 1 && monthNum <= 12) ? months[monthNum - 1] : ""
-        return "\(monthName) \(year)"
     }
 }
 

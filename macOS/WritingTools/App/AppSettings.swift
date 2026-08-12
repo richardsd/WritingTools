@@ -53,6 +53,21 @@ final class AppSettings {
     var openAIModel: String {
         didSet { defaults.set(openAIModel, forKey: "openai_model") }
     }
+
+    var openAIOAuthModel: String {
+        didSet { defaults.set(openAIOAuthModel, forKey: "openai_oauth_model") }
+    }
+
+    var openAIOAuthReasoningEffort: String {
+        didSet {
+            defaults.set(
+                openAIOAuthReasoningEffort,
+                forKey: "openai_oauth_reasoning_effort"
+            )
+        }
+    }
+
+    var openAIOAuthMigrationNotice: String?
     
     var openAIOrganization: String? {
         didSet { defaults.set(openAIOrganization, forKey: "openai_organization") }
@@ -198,10 +213,34 @@ final class AppSettings {
         
         self.openAIApiKey = (try? keychain.retrieve(forKey: "openai_api_key")) ?? ""
         self.openAIBaseURL = defaults.string(forKey: "openai_base_url") ?? OpenAIConfig.defaultBaseURL
-        self.openAIModel = defaults.string(forKey: "openai_model") ?? OpenAIConfig.defaultModel
+
+        let legacyOpenAIModel = defaults.string(forKey: "openai_model") ?? OpenAIConfig.defaultModel
+        let storedOpenAIAuthMode = defaults.string(forKey: "openai_auth_mode") ?? "apiKey"
+        let oauthModelResolution: (model: CodexOAuthModel, notice: String?)
+        if let storedOAuthModel = defaults.string(forKey: "openai_oauth_model") {
+            oauthModelResolution = CodexOAuthModel.resolveSavedModel(storedOAuthModel)
+        } else if storedOpenAIAuthMode == OpenAIAuthMode.oauth.rawValue {
+            oauthModelResolution = CodexOAuthModel.migrateLegacyModel(legacyOpenAIModel)
+        } else {
+            oauthModelResolution = (.defaultModel, nil)
+        }
+
+        let storedReasoningEffort = defaults.string(forKey: "openai_oauth_reasoning_effort")
+        let reasoningEffort = (
+            CodexReasoningEffort(rawValue: storedReasoningEffort ?? "")
+            ?? CodexOAuthModel.defaultEffort
+        ).normalized(for: oauthModelResolution.model)
+
+        self.openAIModel = legacyOpenAIModel
+        self.openAIOAuthModel = oauthModelResolution.model.rawValue
+        self.openAIOAuthReasoningEffort = reasoningEffort.rawValue
+        self.openAIOAuthMigrationNotice = oauthModelResolution.notice
         self.openAIOrganization = defaults.string(forKey: "openai_organization")
         self.openAIProject = defaults.string(forKey: "openai_project")
-        self.openAIAuthMode = defaults.string(forKey: "openai_auth_mode") ?? "apiKey"
+        self.openAIAuthMode = storedOpenAIAuthMode
+
+        defaults.set(oauthModelResolution.model.rawValue, forKey: "openai_oauth_model")
+        defaults.set(reasoningEffort.rawValue, forKey: "openai_oauth_reasoning_effort")
         
         self.mistralApiKey = (try? keychain.retrieve(forKey: "mistral_api_key")) ?? ""
         self.mistralBaseURL = defaults.string(forKey: "mistral_base_url") ?? MistralConfig.defaultBaseURL

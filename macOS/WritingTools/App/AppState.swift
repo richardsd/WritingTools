@@ -255,11 +255,17 @@ final class AppState {
         switch providerName {
         case "openai":
             let authMode = OpenAIAuthMode(rawValue: asettings.openAIAuthMode) ?? .apiKey
+            let resolvedModel = authMode == .oauth
+                ? CodexOAuthModel.resolveSavedModel(model).model.rawValue
+                : model
             let config = OpenAIConfig(
                 apiKey: asettings.openAIApiKey,
                 baseURL: asettings.openAIBaseURL,
-                model: model,
-                authMode: authMode
+                model: resolvedModel,
+                authMode: authMode,
+                oauthReasoningEffort: CodexReasoningEffort(
+                    rawValue: asettings.openAIOAuthReasoningEffort
+                ) ?? CodexOAuthModel.defaultEffort
             )
             return OpenAIProvider(config: config)
 
@@ -326,11 +332,17 @@ final class AppState {
 
         // Initialize OpenAI
         let authMode = OpenAIAuthMode(rawValue: asettings.openAIAuthMode) ?? .apiKey
+        let selectedOpenAIModel = authMode == .oauth
+            ? asettings.openAIOAuthModel
+            : asettings.openAIModel
         let openAIConfig = OpenAIConfig(
             apiKey: asettings.openAIApiKey,
             baseURL: asettings.openAIBaseURL,
-            model: asettings.openAIModel,
-            authMode: authMode
+            model: selectedOpenAIModel,
+            authMode: authMode,
+            oauthReasoningEffort: CodexReasoningEffort(
+                rawValue: asettings.openAIOAuthReasoningEffort
+            ) ?? CodexOAuthModel.defaultEffort
         )
         self.openAIProvider = OpenAIProvider(config: openAIConfig)
 
@@ -408,7 +420,16 @@ final class AppState {
         asettings.openAIModel = model
 
         let authMode = OpenAIAuthMode(rawValue: asettings.openAIAuthMode) ?? .apiKey
-        let config = OpenAIConfig(apiKey: apiKey, baseURL: baseURL, model: model, authMode: authMode)
+        let selectedModel = authMode == .oauth ? asettings.openAIOAuthModel : model
+        let config = OpenAIConfig(
+            apiKey: apiKey,
+            baseURL: baseURL,
+            model: selectedModel,
+            authMode: authMode,
+            oauthReasoningEffort: CodexReasoningEffort(
+                rawValue: asettings.openAIOAuthReasoningEffort
+            ) ?? CodexOAuthModel.defaultEffort
+        )
         openAIProvider = OpenAIProvider(config: config)
     }
 

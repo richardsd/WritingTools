@@ -17,14 +17,313 @@ enum OpenAIAuthMode: String, Codable, CaseIterable {
     }
 }
 
+enum CodexReasoningEffort: String, Codable, CaseIterable, Identifiable {
+    case low
+    case medium
+    case high
+    case xhigh
+    case max
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .low: return "Low"
+        case .medium: return "Medium"
+        case .high: return "High"
+        case .xhigh: return "Extra High"
+        case .max: return "Max"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .low: return "Fast responses with lighter reasoning."
+        case .medium: return "Balances speed and reasoning depth for everyday tasks."
+        case .high: return "Greater reasoning depth for complex tasks."
+        case .xhigh: return "Extra reasoning depth for difficult, multi-step tasks."
+        case .max: return "Maximum reasoning depth for the hardest tasks."
+        }
+    }
+
+    private var rank: Int {
+        switch self {
+        case .low: return 0
+        case .medium: return 1
+        case .high: return 2
+        case .xhigh: return 3
+        case .max: return 4
+        }
+    }
+
+    func normalized(for model: CodexOAuthModel) -> CodexReasoningEffort {
+        if model.supportedReasoningEfforts.contains(self) {
+            return self
+        }
+
+        return model.supportedReasoningEfforts
+            .filter { $0.rank <= rank }
+            .last ?? model.recommendedReasoningEffort
+    }
+}
+
 struct OpenAIConfig: Codable {
     var apiKey: String
     var baseURL: String
     var model: String
     var authMode: OpenAIAuthMode
+    var oauthReasoningEffort: CodexReasoningEffort = .medium
 
     static let defaultBaseURL = "https://api.openai.com"
     static let defaultModel = "gpt-5.4"
+}
+
+// MARK: - Codex OAuth Model Catalog
+
+enum CodexOAuthModelGroup: String, CaseIterable, Identifiable {
+    case recommended = "Recommended"
+    case preview = "Preview"
+    case older = "Older Models"
+
+    var id: String { rawValue }
+}
+
+enum CodexOAuthModelStatus: String {
+    case current = "Current"
+    case preview = "Preview"
+    case older = "Older"
+}
+
+struct CodexOAuthModelMetadata {
+    let displayName: String
+    let description: String
+    let group: CodexOAuthModelGroup
+    let status: CodexOAuthModelStatus
+    let availability: String
+    let supportsImages: Bool
+    let retirementNotice: String?
+    let documentationURL: String
+}
+
+enum CodexOAuthModel: String, CaseIterable, Identifiable {
+    case gpt56Sol = "gpt-5.6-sol"
+    case gpt56Terra = "gpt-5.6-terra"
+    case gpt56Luna = "gpt-5.6-luna"
+    case gpt53CodexSpark = "gpt-5.3-codex-spark"
+    case gpt55 = "gpt-5.5"
+    case gpt54 = "gpt-5.4"
+    case gpt54Mini = "gpt-5.4-mini"
+
+    static let defaultModel = CodexOAuthModel.gpt56Sol
+    static let defaultEffort = CodexReasoningEffort.medium
+
+    var id: String { rawValue }
+    var displayName: String { metadata.displayName }
+    var supportsImages: Bool { metadata.supportsImages }
+
+    var recommendedReasoningEffort: CodexReasoningEffort {
+        self == .gpt53CodexSpark ? .high : .medium
+    }
+
+    var supportedReasoningEfforts: [CodexReasoningEffort] {
+        switch self {
+        case .gpt56Sol, .gpt56Terra, .gpt56Luna:
+            return [.low, .medium, .high, .xhigh, .max]
+        case .gpt53CodexSpark, .gpt55, .gpt54, .gpt54Mini:
+            return [.low, .medium, .high, .xhigh]
+        }
+    }
+
+    var metadata: CodexOAuthModelMetadata {
+        let docsURL = "https://learn.chatgpt.com/docs/models"
+
+        switch self {
+        case .gpt56Sol:
+            return CodexOAuthModelMetadata(
+                displayName: "GPT-5.6 Sol",
+                description: "Flagship model for complex work that needs the strongest analysis, judgment, and polish.",
+                group: .recommended,
+                status: .current,
+                availability: "ChatGPT",
+                supportsImages: true,
+                retirementNotice: nil,
+                documentationURL: docsURL
+            )
+        case .gpt56Terra:
+            return CodexOAuthModelMetadata(
+                displayName: "GPT-5.6 Terra",
+                description: "Balanced everyday model with strong reasoning and tool use.",
+                group: .recommended,
+                status: .current,
+                availability: "ChatGPT",
+                supportsImages: true,
+                retirementNotice: nil,
+                documentationURL: docsURL
+            )
+        case .gpt56Luna:
+            return CodexOAuthModelMetadata(
+                displayName: "GPT-5.6 Luna",
+                description: "Fast model for clear, repeatable, and high-volume work.",
+                group: .recommended,
+                status: .current,
+                availability: "ChatGPT",
+                supportsImages: true,
+                retirementNotice: nil,
+                documentationURL: docsURL
+            )
+        case .gpt53CodexSpark:
+            return CodexOAuthModelMetadata(
+                displayName: "GPT-5.3 Codex Spark",
+                description: "Text-only research preview optimized for near-instant iteration.",
+                group: .preview,
+                status: .preview,
+                availability: "ChatGPT Pro",
+                supportsImages: false,
+                retirementNotice: nil,
+                documentationURL: docsURL
+            )
+        case .gpt55:
+            return CodexOAuthModelMetadata(
+                displayName: "GPT-5.5",
+                description: "Previous-generation frontier model for complex work.",
+                group: .older,
+                status: .older,
+                availability: "ChatGPT",
+                supportsImages: true,
+                retirementNotice: nil,
+                documentationURL: docsURL
+            )
+        case .gpt54:
+            return CodexOAuthModelMetadata(
+                displayName: "GPT-5.4",
+                description: "Previous model for professional work and coding.",
+                group: .older,
+                status: .older,
+                availability: "ChatGPT",
+                supportsImages: true,
+                retirementNotice: "Retires from Codex with ChatGPT sign-in on August 31, 2026.",
+                documentationURL: docsURL
+            )
+        case .gpt54Mini:
+            return CodexOAuthModelMetadata(
+                displayName: "GPT-5.4 Mini",
+                description: "Previous fast model for responsive and lower-cost tasks.",
+                group: .older,
+                status: .older,
+                availability: "ChatGPT",
+                supportsImages: true,
+                retirementNotice: "Retires from Codex with ChatGPT sign-in on August 31, 2026.",
+                documentationURL: docsURL
+            )
+        }
+    }
+
+    static func models(in group: CodexOAuthModelGroup) -> [CodexOAuthModel] {
+        allCases.filter { $0.metadata.group == group }
+    }
+
+    static func resolveSavedModel(_ rawValue: String?) -> (model: CodexOAuthModel, notice: String?) {
+        guard let rawValue, !rawValue.isEmpty else {
+            return (.defaultModel, nil)
+        }
+
+        guard let model = CodexOAuthModel(rawValue: rawValue) else {
+            return (
+                .defaultModel,
+                "Your unavailable Codex OAuth model “\(rawValue)” was replaced with GPT-5.6 Sol."
+            )
+        }
+
+        return (model, nil)
+    }
+
+    static func migrateLegacyModel(_ rawValue: String?) -> (model: CodexOAuthModel, notice: String?) {
+        guard let rawValue, !rawValue.isEmpty else {
+            return (.defaultModel, nil)
+        }
+
+        switch rawValue {
+        case CodexOAuthModel.gpt54.rawValue:
+            return (
+                .gpt56Terra,
+                "Your saved GPT-5.4 OAuth selection was updated to GPT-5.6 Terra. GPT-5.4 remains available under Older Models."
+            )
+        case CodexOAuthModel.gpt54Mini.rawValue:
+            return (
+                .gpt56Luna,
+                "Your saved GPT-5.4 Mini OAuth selection was updated to GPT-5.6 Luna. GPT-5.4 Mini remains available under Older Models."
+            )
+        default:
+            if let model = CodexOAuthModel(rawValue: rawValue) {
+                return (model, nil)
+            }
+            return (
+                .defaultModel,
+                "Your unavailable Codex OAuth model “\(rawValue)” was replaced with GPT-5.6 Sol."
+            )
+        }
+    }
+}
+
+enum CodexOAuthRequestError: LocalizedError {
+    case unsupportedModel(String)
+    case imagesNotSupported(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedModel(let model):
+            return "The selected model \(model) is not available with Codex OAuth."
+        case .imagesNotSupported(let model):
+            return "\(model) is text-only. Choose another model to process images."
+        }
+    }
+}
+
+enum CodexOAuthRequestBuilder {
+    static func makeBody(
+        modelID: String,
+        reasoningEffort: CodexReasoningEffort,
+        systemPrompt: String?,
+        userPrompt: String,
+        images: [Data]
+    ) throws -> [String: Any] {
+        guard let model = CodexOAuthModel(rawValue: modelID) else {
+            throw CodexOAuthRequestError.unsupportedModel(modelID)
+        }
+        guard images.isEmpty || model.supportsImages else {
+            throw CodexOAuthRequestError.imagesNotSupported(model.displayName)
+        }
+
+        var contentParts: [[String: Any]] = [
+            ["type": "input_text", "text": userPrompt]
+        ]
+        for imageData in images {
+            contentParts.append([
+                "type": "input_image",
+                "image_url": "data:image/jpeg;base64,\(imageData.base64EncodedString())",
+                "detail": "auto",
+            ])
+        }
+
+        var body: [String: Any] = [
+            "model": model.rawValue,
+            "input": [[
+                "role": "user",
+                "content": contentParts,
+            ]],
+            "reasoning": [
+                "effort": reasoningEffort.normalized(for: model).rawValue,
+            ],
+            "stream": true,
+            "store": false,
+        ]
+
+        if let systemPrompt, !systemPrompt.isEmpty {
+            body["instructions"] = systemPrompt
+        }
+
+        return body
+    }
 }
 
 // MARK: - Model Metadata
@@ -207,7 +506,13 @@ final class OpenAIProvider: AIProvider {
     private var aiProxyService: OpenAIService?
     private let streamActivity = AITextStreamActivityTracker()
 
-    var modelDisplayName: String { config.model }
+    var modelDisplayName: String {
+        if config.authMode == .oauth,
+           let model = CodexOAuthModel(rawValue: config.model) {
+            return model.displayName
+        }
+        return config.model
+    }
     
     // OAuth state
     private var callbackServer: CodexCallbackServer?
@@ -490,46 +795,13 @@ final class OpenAIProvider: AIProvider {
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        var input: [[String: Any]] = []
-
-        if images.isEmpty {
-            input.append([
-                "role": "user",
-                "content": [[
-                    "type": "input_text",
-                    "text": userPrompt,
-                ]],
-            ])
-        } else {
-            var contentParts: [[String: Any]] = [
-                ["type": "input_text", "text": userPrompt]
-            ]
-
-            for imageData in images {
-                let base64 = imageData.base64EncodedString()
-                contentParts.append([
-                    "type": "input_image",
-                    "image_url": "data:image/jpeg;base64,\(base64)",
-                    "detail": "auto",
-                ])
-            }
-
-            input.append([
-                "role": "user",
-                "content": contentParts,
-            ])
-        }
-
-        var body: [String: Any] = [
-            "model": config.model,
-            "input": input,
-            "stream": true,
-            "store": false,
-        ]
-
-        if let instructions = systemPrompt, !instructions.isEmpty {
-            body["instructions"] = instructions
-        }
+        let body = try CodexOAuthRequestBuilder.makeBody(
+            modelID: config.model,
+            reasoningEffort: config.oauthReasoningEffort,
+            systemPrompt: systemPrompt,
+            userPrompt: userPrompt,
+            images: images
+        )
 
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
@@ -693,50 +965,13 @@ final class OpenAIProvider: AIProvider {
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
-        // Build input array (Codex format uses "input" not "messages")
-        var input: [[String: Any]] = []
-        
-        // Add user message to input
-        if images.isEmpty {
-            input.append([
-                "role": "user",
-                "content": [[
-                    "type": "input_text",
-                    "text": userPrompt
-                ]]
-            ])
-        } else {
-            var contentParts: [[String: Any]] = [
-                ["type": "input_text", "text": userPrompt]
-            ]
-            
-            for imageData in images {
-                let base64 = imageData.base64EncodedString()
-                contentParts.append([
-                    "type": "input_image",
-                    "image_url": "data:image/jpeg;base64,\(base64)",
-                    "detail": "auto"
-                ])
-            }
-            
-            input.append([
-                "role": "user",
-                "content": contentParts
-            ])
-        }
-        
-        // Codex Responses API format
-        var body: [String: Any] = [
-            "model": config.model,
-            "input": input,
-            "stream": true,  // Required by Codex
-            "store": false   // Required by Codex
-        ]
-        
-        // Add instructions if provided (optional system prompt)
-        if let instructions = systemPrompt, !instructions.isEmpty {
-            body["instructions"] = instructions
-        }
+        let body = try CodexOAuthRequestBuilder.makeBody(
+            modelID: config.model,
+            reasoningEffort: config.oauthReasoningEffort,
+            systemPrompt: systemPrompt,
+            userPrompt: userPrompt,
+            images: images
+        )
         
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         
